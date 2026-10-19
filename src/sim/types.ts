@@ -1,12 +1,12 @@
 import type { Polygon, Vec2 } from './geom';
 
 export type Mode = 'rail' | 'road';
-export type Cargo = 'grain' | 'logs' | 'food' | 'goods';
+export type Cargo = 'grain' | 'logs' | 'oil' | 'food' | 'goods' | 'fuel';
 /** What a group of travellers is: passengers or one kind of cargo. */
 export type Freight = 'pax' | Cargo;
 /** What a vehicle carries; passengers and cargo route on separate graphs. */
 export type Carries = 'pax' | 'cargo';
-export type IndustryKind = 'farm' | 'forest' | 'foodplant' | 'sawmill';
+export type IndustryKind = 'farm' | 'forest' | 'oilwell' | 'foodplant' | 'sawmill' | 'refinery';
 
 export interface District {
   id: number;
@@ -26,6 +26,8 @@ export interface House {
   stop: number;
   /** Roof colour index, for drawing. */
   roof: number;
+  /** Downtown shop or office block rather than a house (drawn differently). */
+  shop: boolean;
 }
 
 export interface Town {
@@ -38,10 +40,14 @@ export interface Town {
   /** Passengers boarding or arriving in this town, this month and last. */
   tripsMonth: number;
   tripsLast: number;
-  /** Food and goods delivered to the town, this month and last. */
+  /** Food, goods and fuel delivered to the town, this month and last, in total and by cargo. */
   supplyMonth: number;
   supplyLast: number;
+  supplyBy: Partial<Record<Cargo, number>>;
+  supplyLastBy: Partial<Record<Cargo, number>>;
   growthLast: number;
+  /** Population at each month end, oldest first (last 36 months). */
+  history: number[];
 }
 
 export interface Industry {
@@ -60,6 +66,10 @@ export interface Industry {
   shippedLast: number;
   receivedMonth: number;
   receivedLast: number;
+  /** Output at each month end, oldest first (last 36 months). */
+  history: number[];
+  /** Output level last announced in the news. */
+  notedRate: number;
 }
 
 /** Travellers waiting at a stop, keyed `${freight}|${destStopId}`; counts are fractional. */
@@ -104,13 +114,24 @@ export interface Line {
   carriedLast: number;
   /** When a vehicle of each kind last left the first stop, for spacing them out. */
   departed: Record<Carries, number>;
+  /** Vehicles wait at the first stop until full (up to CONFIG.fullLoadMaxMonths). */
+  fullLoad: boolean;
+  /** Profit at each month end, oldest first (last 24 months). */
+  history: number[];
 }
 
-export type VehicleKey = 'train' | 'freight' | 'bus' | 'truck';
+/** The four kinds of vehicle; each has several models over the years. */
+export type VehicleKind = 'train' | 'freight' | 'bus' | 'truck';
 
 export interface VehicleType {
-  key: VehicleKey;
+  /** Model id, e.g. 'steam'. */
+  key: string;
   name: string;
+  kind: VehicleKind;
+  /** First year the model can be bought. */
+  year: number;
+  /** Main body colour. */
+  livery: string;
   mode: Mode;
   carries: Carries;
   speed: number;
@@ -159,6 +180,10 @@ export interface Vehicle {
   stopping: boolean;
   load: Group[];
   odo: number;
+  /** Sim time when bought or last renewed, for aging. */
+  bornAt: number;
+  /** Seconds spent waiting for a full load at the first stop. */
+  held: number;
 }
 
 export interface Ledger {
@@ -197,8 +222,16 @@ export interface MapDef {
   industries: IndustryDef[];
 }
 
+export interface News {
+  month: number;
+  text: string;
+  /** Good news, bad news, or neutral information. */
+  tone: 'good' | 'bad' | 'info';
+}
+
 export type SimEvent =
   | { type: 'deliver'; stop: number; amount: number; line: number }
   | { type: 'monthEnd'; month: number }
   | { type: 'warning'; text: string }
+  | { type: 'news'; news: News }
   | { type: 'bankrupt' };

@@ -144,7 +144,8 @@ export class Router {
       const rev: Edge[][] = stops.map(() => []);
       for (const line of lines) {
         const fleet = vehicles.filter((v) => v.line === line.id && v.type.carries === k);
-        if (fleet.length) this.addLine(rev, line, fleet[0].type, fleet.length);
+        // Plan with the slowest model on the line, so mixed fleets are not over-promised.
+        if (fleet.length) this.addLine(rev, line, fleet.reduce((a, b) => (b.type.speed < a.type.speed ? b : a)).type, fleet.length);
       }
       this.rev[k] = rev;
     }

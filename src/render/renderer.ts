@@ -1,7 +1,7 @@
 import { CARGO_LABEL, CONFIG } from '../sim/config';
-import { v, type Polygon, type Vec2 } from '../sim/geom';
+import { dist, distToSegment, pointInPolygon, v, type Polygon, type Vec2 } from '../sim/geom';
 import { townRadius } from '../sim/towns';
-import type { Cargo, Industry, Stop, Vehicle } from '../sim/types';
+import type { Cargo, House, Industry, Stop, Vehicle } from '../sim/types';
 import { loadOf, vehiclePose } from '../sim/vehicles';
 import { LINE_SPACING, money, type World } from '../sim/world';
 import type { Camera } from '../ui/camera';
@@ -26,8 +26,13 @@ export const THEME = {
   ballast: '#a79d8c',
   sleeper: '#66513f',
   rail: '#34322f',
-  roofs: ['#b45e3d', '#8e5a42', '#6c7480', '#c69a69'],
-  ridge: 'rgba(0,0,0,0.22)',
+  /** House roofs: the sunlit side, then the shaded side of each gable. */
+  roofs: ['#c46a46', '#9a6249', '#7a828d', '#d0a676'],
+  roofsShade: ['#97492d', '#734431', '#5a616b', '#a8804f'],
+  /** Flat roofs of downtown shops and offices. */
+  shops: ['#a7adb4', '#c2b8a6', '#8d97a4', '#b9bec4'],
+  sidewalk: '#bdb6a8',
+  shadow: 'rgba(25,35,15,0.24)',
   platform: '#dcd6c8',
   stationRoof: '#44505b',
   busStop: '#2d6cae',
@@ -40,8 +45,11 @@ export const THEME = {
   bus: '#e0ab2e',
   truck: '#b8412f',
   lines: ['#e8503a', '#3b7ddd', '#2fae64', '#f0a828', '#9b5ac6', '#14a8b8', '#ec6fa6', '#8a9a2a'],
-  cargo: { grain: '#e5c24a', logs: '#8b5a2b', food: '#d65f5f', goods: '#6a90cc' } satisfies Record<Cargo, string>,
+  cargo: { grain: '#e5c24a', logs: '#8b5a2b', oil: '#9aa1a8', food: '#d65f5f', goods: '#6a90cc', fuel: '#a463c9' } satisfies Record<Cargo, string>,
 };
+
+/** What the map emphasises: line colours, nothing, house coverage, or cargo flows. */
+export type Layer = 'lines' | 'plain' | 'coverage' | 'cargo';
 
 const LOUPE_R = 64;
 const LOUPE_ZOOM = 1.8;
@@ -65,8 +73,11 @@ export class Renderer {
   private roofCache: { canvas: HTMLCanvasElement; key: string } | null = null;
   private fields = new Map<number, { poly: Polygon; kind: number }[]>();
   private stopAngles = { version: -1, map: new Map<number, number>() };
+  private streets: { key: string; segs: number[] } = { key: '', segs: [] };
+  private trees: { map: unknown; pts: { x: number; y: number; r: number }[] } = { map: null, pts: [] };
   /** Screen px reserved for the HUD above and below the map. */
   insets = { top: 64, bottom: 92 };
+  layer: Layer = 'lines';
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -106,12 +117,15 @@ export class Renderer {
   private drawScene(world: World, editor: Editor, now: number, z: number): void {
     const px = (n: number) => n / z;
     this.drawGround(world, px);
-    this.drawStreets(world, z);
+    if (z > 0.1) this.drawTrees(world);
+    this.drawStreets(world, px, z);
     this.drawRoads(world, px, z);
     this.drawTrack(world, px, z);
-    this.drawRoofs(world, z);
+    this.drawBuildings(world, z);
     for (const ind of world.industries) this.drawIndustry(ind, px, z);
-    if (editor.tool === 'rail' || editor.tool === 'road') this.drawReach(world, editor.tool, px);
+    if (this.layer === 'coverage') this.drawCoverage(world, px);
+    if (this.layer === 'cargo') this.drawCargoFlows(world, px, now);
+    if (editor.tool === 'rail' || editor.tool === 'road' || this.layer === 'cargo') this.drawReach(world, editor.tool === 'road' ? 'road' : 'rail', px);
     const pv = editor.preview();
     this.drawLines(world, editor, px, pv?.lineId ?? null);
     if (pv) this.drawPreview(world, editor, px);
@@ -206,29 +220,74 @@ export class Renderer {
     return all;
   }
 
-  private drawStreets(world: World, z: number): void {
-    const ctx = this.ctx;
-    const step = CONFIG.lot * CONFIG.streetEvery;
-    ctx.strokeStyle = THEME.street;
-    ctx.lineWidth = Math.max(12, 2 / z);
-    ctx.lineCap = 'butt';
-    ctx.beginPath();
-    for (const t of world.towns) {
-      const r = townRadius(t.pop) * 0.95;
-      if (!this.visible(t.center, r)) continue;
-      const c = t.center;
-      for (let x = Math.ceil((c.x - r) / step) * step; x <= c.x + r; x += step) {
-        const half = Math.sqrt(Math.max(0, r * r - (x - c.x) ** 2));
-        ctx.moveTo(x, c.y - half);
-        ctx.lineTo(x, c.y + half);
+  /** Streets run round every block that has a building on it. */
+  private drawStreets(world: World, px: (n: number) => number, z: number): void {
+    const S = CONFIG.lot * CONFIG.streetEvery;
+    const key = `${world.catchVersion}:${world.houses.length}:${world.seed}`;
+    if (this.streets.key !== key) {
+      const blocks = new Set<string>();
+      for (const h of world.houses) blocks.add(`${Math.floor(h.pos.x / S)},${Math.floor(h.pos.y / S)}`);
+      const edges = new Set<string>();
+      for (const b of blocks) {
+        const [bx, by] = b.split(',').map(Number);
+        edges.add(`h${bx},${by}`).add(`h${bx},${by + 1}`).add(`v${bx},${by}`).add(`v${bx + 1},${by}`);
       }
-      for (let y = Math.ceil((c.y - r) / step) * step; y <= c.y + r; y += step) {
-        const half = Math.sqrt(Math.max(0, r * r - (y - c.y) ** 2));
-        ctx.moveTo(c.x - half, y);
-        ctx.lineTo(c.x + half, y);
+      const segs: number[] = [];
+      for (const e of edges) {
+        const [x, y] = e.slice(1).split(',').map(Number);
+        if (e[0] === 'h') segs.push(x * S, y * S, (x + 1) * S, y * S);
+        else segs.push(x * S, y * S, x * S, (y + 1) * S);
       }
+      this.streets = { key, segs };
     }
+    const ctx = this.ctx;
+    const segs = this.streets.segs;
+    const trace = () => {
+      ctx.beginPath();
+      for (let i = 0; i < segs.length; i += 4) {
+        if (!this.visible(v((segs[i] + segs[i + 2]) / 2, (segs[i + 1] + segs[i + 3]) / 2), S)) continue;
+        ctx.moveTo(segs[i], segs[i + 1]);
+        ctx.lineTo(segs[i + 2], segs[i + 3]);
+      }
+    };
+    ctx.lineCap = 'square';
+    if (z < 0.25) {
+      ctx.strokeStyle = THEME.street;
+      ctx.lineWidth = Math.max(12, px(1.2));
+      trace();
+      ctx.stroke();
+      return;
+    }
+    trace();
+    ctx.strokeStyle = THEME.sidewalk;
+    ctx.lineWidth = 19;
     ctx.stroke();
+    ctx.strokeStyle = THEME.street;
+    ctx.lineWidth = 11;
+    ctx.stroke();
+  }
+
+  /** Scattered trees in the countryside, laid out once per map. */
+  private drawTrees(world: World): void {
+    if (this.trees.map !== world.map) this.trees = { map: world.map, pts: scatterTrees(world) };
+    const ctx = this.ctx;
+    const pts = this.trees.pts;
+    for (const [color, k, dx] of [
+      [THEME.shadow, 1, 4],
+      [THEME.tree, 1, 0],
+      [THEME.treeLight, 0.45, -0.3],
+    ] as const) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      for (const t of pts) {
+        if (!this.visible(t, 40)) continue;
+        const r = t.r * k;
+        const ox = dx > 1 ? dx : dx * t.r;
+        ctx.moveTo(t.x + ox + r, t.y + ox);
+        ctx.arc(t.x + ox, t.y + ox, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
   }
 
   private drawRoads(world: World, px: (n: number) => number, z: number): void {
@@ -303,54 +362,24 @@ export class Renderer {
     }
   }
 
-  private drawRoofs(world: World, z: number): void {
-    if (z < ROOF_CACHE_ZOOM) return this.drawRoofCache(world);
-    const ctx = this.ctx;
-    const pad = 40;
-    for (let c = 0; c < THEME.roofs.length; c++) {
-      ctx.fillStyle = THEME.roofs[c];
-      ctx.beginPath();
-      for (const h of world.houses) {
-        if (h.roof !== c || !this.visible(h.pos, pad)) continue;
-        const s = 11 + h.residents * 1.3;
-        ctx.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s * 0.8);
-      }
-      ctx.fill();
-    }
-    if (z > 0.6) {
-      ctx.strokeStyle = THEME.ridge;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      for (const h of world.houses) {
-        if (!this.visible(h.pos, pad)) continue;
-        const s = 11 + h.residents * 1.3;
-        ctx.moveTo(h.pos.x - s / 2, h.pos.y - s * 0.1);
-        ctx.lineTo(h.pos.x + s / 2, h.pos.y - s * 0.1);
-      }
-      ctx.stroke();
-    }
+  /** Houses with gabled roofs (sunlit and shaded halves), downtown blocks with flat roofs, and their shadows. */
+  private drawBuildings(world: World, z: number): void {
+    if (z < ROOF_CACHE_ZOOM) return this.drawBuildingCache(world);
+    const vis = world.houses.filter((h) => this.visible(h.pos, 40));
+    paintBuildings(this.ctx, vis, z);
   }
 
-  /** Zoomed out, all roofs come from one bitmap that is redrawn only when houses change. */
-  private drawRoofCache(world: World): void {
+  /** Zoomed out, all buildings come from one bitmap that is redrawn only when houses change. */
+  private drawBuildingCache(world: World): void {
     const m = world.map;
-    const key = `${world.houses.length}:${world.seed}`;
+    const key = `${world.catchVersion}:${world.houses.length}:${world.seed}`;
     if (this.roofCache?.key !== key) {
       const canvas = this.roofCache?.canvas ?? document.createElement('canvas');
       canvas.width = Math.ceil(m.halfW * 2 * ROOF_CACHE_SCALE);
       canvas.height = Math.ceil(m.halfH * 2 * ROOF_CACHE_SCALE);
       const c = canvas.getContext('2d')!;
       c.setTransform(ROOF_CACHE_SCALE, 0, 0, ROOF_CACHE_SCALE, m.halfW * ROOF_CACHE_SCALE, m.halfH * ROOF_CACHE_SCALE);
-      for (let k = 0; k < THEME.roofs.length; k++) {
-        c.fillStyle = THEME.roofs[k];
-        c.beginPath();
-        for (const h of world.houses) {
-          if (h.roof !== k) continue;
-          const s = 14 + h.residents * 1.3;
-          c.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s * 0.85);
-        }
-        c.fill();
-      }
+      paintBuildings(c, world.houses, ROOF_CACHE_SCALE);
       this.roofCache = { canvas, key };
     }
     this.ctx.drawImage(this.roofCache.canvas, -m.halfW, -m.halfH, m.halfW * 2, m.halfH * 2);
@@ -420,6 +449,37 @@ export class Renderer {
         silo(-30, 50, 18, '#e3ded2');
         box(60, 20, 14, 40, '#7b4a3a');
         break;
+      case 'oilwell': {
+        ctx.fillStyle = '#b9ab88';
+        ctx.fillRect(x - 120, y - 80, 240, 170);
+        for (const [jx, jy] of [[-70, -30], [10, -45], [-30, 30]]) {
+          // Pumpjack: a base, a beam and a horse head.
+          box(jx - 14, jy + 6, 28, 8, '#4a4a4a');
+          ctx.strokeStyle = '#2b2b2b';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(x + jx - 16, y + jy - 6);
+          ctx.lineTo(x + jx + 16, y + jy + 2);
+          ctx.stroke();
+          silo(jx + 18, jy + 3, 4, '#2b2b2b');
+        }
+        silo(65, 20, 22, '#d8d2c4');
+        silo(65, -30, 16, '#d8d2c4');
+        break;
+      }
+      case 'refinery':
+        ctx.fillStyle = '#9d9a92';
+        ctx.fillRect(x - 140, y - 90, 280, 190);
+        for (const [tx, ty, tr] of [[-100, -55, 22], [-50, -55, 22], [-100, 0, 22], [-50, 0, 22]]) silo(tx, ty, tr, '#e2ddd0');
+        box(10, -70, 18, 90, '#6d7680');
+        box(40, -60, 14, 80, '#6d7680');
+        box(70, -40, 50, 60, '#c9c3b5', '#8d939b');
+        box(-120, 45, 110, 30, '#b9b2a2', '#7e848c');
+        ctx.fillStyle = '#f2a43a';
+        ctx.beginPath();
+        ctx.arc(x + 100, y - 70, 7, 0, Math.PI * 2);
+        ctx.fill();
+        break;
       case 'sawmill':
         ctx.fillStyle = '#9b8e74';
         ctx.fillRect(x - 130, y - 70, 260, 150);
@@ -455,6 +515,81 @@ export class Renderer {
     ctx.setLineDash([]);
   }
 
+  /** Coverage layer: every house green if a stop reaches it, red if not, with stop catchments. */
+  private drawCoverage(world: World, px: (n: number) => number): void {
+    const ctx = this.ctx;
+    const m = world.map;
+    ctx.fillStyle = 'rgba(14,19,23,0.55)';
+    ctx.fillRect(-m.halfW, -m.halfH, m.halfW * 2, m.halfH * 2);
+    const s = Math.max(10, px(2));
+    for (const served of [false, true]) {
+      ctx.fillStyle = served ? '#6fdc8c' : '#ff7a63';
+      ctx.beginPath();
+      for (const h of world.houses) {
+        if (h.stop >= 0 !== served || !this.visible(h.pos, 20)) continue;
+        ctx.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s);
+      }
+      ctx.fill();
+    }
+    ctx.lineWidth = px(1.5);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    for (const st of world.stops) {
+      ctx.beginPath();
+      ctx.arc(st.pos.x, st.pos.y, CONFIG.stop[st.mode].catchment, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /** Cargo layer: an arrow from each industry's stop to where its cargo goes, as wide as last month's shipments. */
+  private drawCargoFlows(world: World, px: (n: number) => number, now: number): void {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round';
+    for (const ind of world.industries) {
+      const route = world.cargoRoute(ind);
+      const color = THEME.cargo[ind.produces];
+      if (!route) {
+        const out = ind.accepts ? ind.receivedLast : ind.rate;
+        if (out <= 0) continue;
+        // Output with nowhere to go: a pulsing ring.
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.5 + 0.5 * Math.sin(now / 250);
+        ctx.lineWidth = px(4);
+        ctx.beginPath();
+        ctx.arc(ind.pos.x, ind.pos.y, 190, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        continue;
+      }
+      const a = world.stopById(route.stop)!.pos;
+      const b = world.stopById(route.dest)!.pos;
+      const len = dist(a, b) || 1;
+      const ux = (b.x - a.x) / len;
+      const uy = (b.y - a.y) / len;
+      const tip = v(b.x - ux * px(14), b.y - uy * px(14));
+      const width = px(Math.max(2.5, Math.min(10, ind.shippedLast / 25)));
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.setLineDash([px(2), px(5)]);
+      ctx.beginPath();
+      ctx.moveTo(ind.pos.x, ind.pos.y);
+      ctx.lineTo(a.x, a.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
+      const head = px(16);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(tip.x + ux * head * 0.6, tip.y + uy * head * 0.6);
+      ctx.lineTo(tip.x - ux * head - uy * head * 0.6, tip.y - uy * head + ux * head * 0.6);
+      ctx.lineTo(tip.x - ux * head + uy * head * 0.6, tip.y - uy * head - ux * head * 0.6);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   // ---------- network ----------
 
   private lineWidth(px: (n: number) => number, selected: boolean): number {
@@ -469,6 +604,8 @@ export class Renderer {
     for (const line of world.lines) {
       if (line.id === skip) continue;
       const selected = line.id === editor.selectedLine;
+      // Other layers hide line colours, except for the line being looked at.
+      if (this.layer !== 'lines' && !selected) continue;
       const lw = this.lineWidth(px, selected);
       ctx.strokeStyle = THEME.lines[line.color];
       ctx.globalAlpha = selected || editor.selectedLine < 0 ? 0.9 : 0.45;
@@ -621,9 +758,9 @@ export class Renderer {
       ctx.translate(pose.p.x, pose.p.y);
       ctx.rotate(Math.atan2(pose.t.y, pose.t.x));
       let body: string = THEME.coach;
-      if (k === 'bus') body = THEME.bus;
+      if (k === 'bus') body = t.type.livery;
       else if (k === 'truck') body = THEME.wagon;
-      else if (c === 0) body = THEME.loco;
+      else if (c === 0) body = t.type.livery;
       else if (k === 'freight') body = THEME.wagon;
       ctx.fillStyle = body;
       roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, 3));
@@ -638,7 +775,7 @@ export class Renderer {
           ctx.fillRect(-len / 2 + 3, -wid / 2 + 2, len - 6, wid * 0.28);
         }
         if (k === 'truck') {
-          ctx.fillStyle = THEME.truck;
+          ctx.fillStyle = t.type.livery;
           ctx.fillRect(len / 2 - len * 0.3, -wid / 2, len * 0.3, wid);
         }
       }
@@ -821,4 +958,101 @@ function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
     }),
   );
   return { grass, forest, hill, field };
+}
+
+/** Where a building stands and which way its roof ridge runs (along the street it faces). */
+function footprint(h: House): { x: number; y: number; w: number; h: number; vertical: boolean } {
+  if (h.shop) {
+    const s = 17 + h.residents * 0.7;
+    return { x: h.pos.x - s / 2, y: h.pos.y - s / 2, w: s, h: s, vertical: false };
+  }
+  const s = 13 + h.residents * 1.15;
+  const m = ((Math.round(h.pos.x / CONFIG.lot) % CONFIG.streetEvery) + CONFIG.streetEvery) % CONFIG.streetEvery;
+  const vertical = m === 1 || m === CONFIG.streetEvery - 1;
+  const w = vertical ? s * 0.78 : s;
+  const hh = vertical ? s : s * 0.78;
+  return { x: h.pos.x - w / 2, y: h.pos.y - hh / 2, w, h: hh, vertical };
+}
+
+/** Draw buildings in a few batched passes: shadows, sunlit and shaded roof halves, flat roofs. */
+function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: number): void {
+  const fps = houses.map(footprint);
+  if (z > 0.22) {
+    ctx.fillStyle = THEME.shadow;
+    ctx.beginPath();
+    for (const f of fps) ctx.rect(f.x + 2.5, f.y + 3, f.w, f.h);
+    ctx.fill();
+  }
+  for (let c = 0; c < THEME.roofs.length; c++) {
+    for (const shade of [false, true]) {
+      ctx.fillStyle = shade ? THEME.roofsShade[c] : THEME.roofs[c];
+      ctx.beginPath();
+      houses.forEach((h, i) => {
+        if (h.shop || h.roof !== c) return;
+        const f = fps[i];
+        if (f.vertical) ctx.rect(shade ? f.x + f.w / 2 : f.x, f.y, f.w / 2, f.h);
+        else ctx.rect(f.x, shade ? f.y + f.h / 2 : f.y, f.w, f.h / 2);
+      });
+      ctx.fill();
+    }
+    ctx.fillStyle = THEME.shops[c];
+    ctx.beginPath();
+    houses.forEach((h, i) => {
+      if (!h.shop || h.roof !== c) return;
+      const f = fps[i];
+      ctx.rect(f.x, f.y, f.w, f.h);
+    });
+    ctx.fill();
+  }
+  if (z > 0.55) {
+    // Parapets and rooftop plant on the flat roofs.
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+    ctx.lineWidth = 1.2;
+    ctx.fillStyle = 'rgba(60,66,72,0.55)';
+    ctx.beginPath();
+    houses.forEach((h, i) => {
+      if (!h.shop) return;
+      const f = fps[i];
+      ctx.rect(f.x + 2.5, f.y + 2.5, f.w - 5, f.h - 5);
+    });
+    ctx.stroke();
+    ctx.beginPath();
+    houses.forEach((h, i) => {
+      if (!h.shop) return;
+      const f = fps[i];
+      ctx.rect(f.x + f.w * 0.55, f.y + f.h * 0.2, 4, 4);
+    });
+    ctx.fill();
+  }
+}
+
+/** Clumps of trees across open country: not in water, forests, towns (at full size), industry yards or on roads. */
+function scatterTrees(world: World): { x: number; y: number; r: number }[] {
+  let seed = 99_991;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const m = world.map;
+  const near = (p: Vec2, path: Vec2[], d: number) => {
+    for (let i = 1; i < path.length; i++) if (distToSegment(p, path[i - 1], path[i]) < d) return true;
+    return false;
+  };
+  const open = (p: Vec2) =>
+    !m.water.some((w) => pointInPolygon(p, w)) &&
+    !m.forests.some((f) => pointInPolygon(p, f)) &&
+    !world.towns.some((t) => dist(t.center, p) < townRadius(t.basePop * CONFIG.growth.capFactor) + 60) &&
+    !world.industries.some((i) => dist(i.pos, p) < 260) &&
+    !m.roads.some((rd) => near(p, rd, 50));
+  const out: { x: number; y: number; r: number }[] = [];
+  for (let i = 0; i < 420; i++) {
+    const c = v((rnd() * 2 - 1) * (m.halfW - 60), (rnd() * 2 - 1) * (m.halfH - 60));
+    if (!open(c)) continue;
+    const n = 2 + Math.floor(rnd() * 5);
+    for (let k = 0; k < n; k++) {
+      const p = v(c.x + (rnd() - 0.5) * 100, c.y + (rnd() - 0.5) * 100);
+      if (open(p)) out.push({ x: p.x, y: p.y, r: 9 + rnd() * 7 });
+    }
+  }
+  return out;
 }

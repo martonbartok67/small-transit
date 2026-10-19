@@ -122,6 +122,8 @@ export function sensible(w: World): void {
       else if (vs.length > 1 && waiting < cap * 0.1 && l.profitLast < 0) w.sellVehicle(l.id, carries);
     }
   }
+  // Modernise when rich: renew lines whose vehicles are old or outdated.
+  if (e.cash > 3_000_000) for (const l of w.lines) w.renewVehicles(l.id);
   if (e.cash < 50_000) e.borrow();
   else if (e.cash > 2_000_000 && e.loan > 0) e.repay();
 }

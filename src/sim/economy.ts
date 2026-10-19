@@ -9,6 +9,11 @@ export class Economy {
   loan = 0;
   month: Ledger = emptyLedger();
   last: Ledger = emptyLedger();
+  /** This calendar year so far, and the whole of last year. */
+  year: Ledger = emptyLedger();
+  lastYear: Ledger = emptyLedger();
+  /** Cash, net result and operating profit (before building and buying) at each month end, oldest first (last 36 months). */
+  history: { cash: number; net: number; operating: number }[] = [];
   negativeMonths = 0;
   /** Ticket price level per mode, 1 = list price. */
   price: Record<Mode, number> = { rail: 1, road: 1 };
@@ -68,8 +73,22 @@ export class Economy {
     this.charge('interest', (this.loan * CONFIG.interestPerYear) / 12);
     this.last = this.month;
     this.month = emptyLedger();
+    for (const k of Object.keys(this.year) as (keyof Ledger)[]) this.year[k] += this.last[k];
+    this.history.push({ cash: this.cash, net: Economy.net(this.last), operating: Economy.operating(this.last) });
+    if (this.history.length > 36) this.history.shift();
     this.negativeMonths = this.cash < 0 ? this.negativeMonths + 1 : 0;
     return this.negativeMonths >= CONFIG.bankruptMonths;
+  }
+
+  /** Start a new calendar year. */
+  closeYear(): void {
+    this.lastYear = this.year;
+    this.year = emptyLedger();
+  }
+
+  /** Income less running costs: the business result before construction and vehicle purchases. */
+  static operating(l: Ledger): number {
+    return l.fares + l.freight + l.running + l.maintenance + l.interest;
   }
 
   static net(l: Ledger): number {

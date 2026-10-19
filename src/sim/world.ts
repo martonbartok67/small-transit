@@ -1,17 +1,17 @@
-import { CONFIG, INDUSTRY, TOWN_CARGO, VEHICLES, vehicleFor } from './config';
+import { CONFIG, INDUSTRY, modelsFor, TOWN_CARGO, VEHICLES, vehicleFor } from './config';
 import { Economy } from './economy';
 import { dist, offsetPolyline, polylineLength, type Vec2 } from './geom';
 import { Rng } from './rng';
 import { ahead, departDir, Router } from './router';
 import { Terrain } from './terrain';
 import { assignCatchment, blockAlong, buildTowns, growTown, isDry, lotKey, refreshPopulations, townRadius, type Lots } from './towns';
-import type { Carries, District, Freight, Group, House, Industry, Line, MapDef, Mode, Segment, SimEvent, Stop, Town, Vehicle, VehicleKey } from './types';
+import type { Carries, District, Freight, Group, House, Industry, Line, MapDef, Mode, News, Segment, SimEvent, Stop, Town, Vehicle, VehicleType } from './types';
 import { dock, loadOf, resyncVehicles, segPath, updateVehicle } from './vehicles';
 
 export const LINE_SPACING: Record<Mode, number> = { rail: 9, road: 7 };
 export const LINE_COLORS = 8;
 /** Bump when the save layout changes; older saves are then ignored. */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 /** Seconds between passenger spawning, cargo production and patience updates. */
 const TICK = 0.5;
@@ -42,6 +42,8 @@ interface DemandCache {
 const terrains = new WeakMap<MapDef, Terrain>();
 /** Houses keep this far from the middle of a road. */
 const ROAD_CLEARANCE = 26;
+/** Houses keep this far from a station's centre. */
+const STATION_CLEARANCE = 56;
 const wayClearance = (w: Way) => (w.mode === 'rail' ? (w.lanes * LINE_SPACING.rail) / 2 + 16 : ROAD_CLEARANCE);
 const kindOf = (what: Freight): Carries => (what === 'pax' ? 'pax' : 'cargo');
 const keyOf = (what: Freight, dest: number) => `${what}|${dest}`;
@@ -70,6 +72,8 @@ export class World {
   delivered = 0;
   /** Units of cargo that reached an industry or town. */
   deliveredCargo = 0;
+  /** Company news, newest last (last 60 items). */
+  news: News[] = [];
   networkVersion = 0;
   /** Increments whenever houses or stops change, so catchment-derived caches refresh. */
   catchVersion = 0;
@@ -95,6 +99,8 @@ export class World {
     if (!terrain) terrains.set(map, (terrain = new Terrain(map)));
     this.terrain = terrain;
     for (const road of map.roads) blockAlong(this.lots, road, ROAD_CLEARANCE);
+    // Industry yards stay clear of houses, however big the towns grow.
+    for (const ind of map.industries) blockAlong(this.lots, [ind.pos, ind.pos], 170);
     const t = buildTowns(map, this.rng, this.lots);
     this.towns = t.towns;
     this.districts = t.districts;
@@ -113,6 +119,8 @@ export class World {
       shippedLast: 0,
       receivedMonth: 0,
       receivedLast: 0,
+      history: [],
+      notedRate: INDUSTRY[d.kind].accepts ? 0 : CONFIG.industry.start,
     }));
     this.router = new Router(this);
   }
@@ -190,7 +198,7 @@ export class World {
   private chargeRunningCosts(dt: number): void {
     const f = dt / CONFIG.monthSeconds;
     for (const v of this.vehicles) {
-      const c = v.type.runningPerMonth * f;
+      const c = this.runningCost(v) * f;
       this.econ.charge('running', c);
       const line = this.lineById(v.line);
       if (line) line.costMonth += c;
@@ -206,6 +214,11 @@ export class World {
       l.profitLast = l.revenueMonth - l.costMonth;
       l.carriedLast = l.carriedMonth;
       l.revenueMonth = l.costMonth = l.carriedMonth = 0;
+      push(l.history, l.profitLast, 24);
+      const h = l.history;
+      if (h.length >= 3 && h.slice(-3).every((x) => x < 0) && !(h.length >= 4 && h[h.length - 4] < 0) && this.vehiclesOn(l.id).length) {
+        this.say(`${l.name} has lost money three months running.`, 'bad');
+      }
     }
     const ic = CONFIG.industry;
     for (const ind of this.industries) {
@@ -218,12 +231,22 @@ export class World {
       const shipped = ind.shippedLast / ind.producedLast;
       if (shipped >= ic.shipWell) ind.rate = Math.min(ic.max, ind.rate * (1 + ic.grow));
       else if (shipped <= ic.shipPoorly) ind.rate = Math.max(ic.start * 0.5, ind.rate * (1 - ic.shrink));
+      if (ind.rate >= ind.notedRate * 1.25 || ind.rate <= ind.notedRate * 0.8) {
+        const up = ind.rate > ind.notedRate;
+        // Cuts at industries nobody serves are expected; only report them where the player ships.
+        if (up || this.cargoRoute(ind)) this.say(`${ind.name} ${up ? 'expands' : 'cuts'} production to ${Math.round(ind.rate)} a month.`, up ? 'good' : 'bad');
+        ind.notedRate = ind.rate;
+      }
     }
+    for (const ind of this.industries) push(ind.history, ind.producedLast, 36);
     let grew = false;
+    const before = this.towns.map((t) => t.pop);
     for (const t of this.towns) {
       t.tripsLast = t.tripsMonth;
       t.supplyLast = t.supplyMonth;
+      t.supplyLastBy = t.supplyBy;
       t.tripsMonth = t.supplyMonth = 0;
+      t.supplyBy = {};
       t.growthLast = growTown(this.map, t, this.houses, this.districts, this.lots, this.rng);
       grew ||= t.growthLast > 0;
     }
@@ -231,7 +254,18 @@ export class World {
       refreshPopulations(this.towns, this.districts, this.houses);
       this.refreshCatchment();
     }
+    for (const t of this.towns) {
+      push(t.history, t.pop, 36);
+      if (Math.floor(t.pop / 1000) > Math.floor(before[t.id] / 1000)) this.say(`${t.name} passes ${(Math.floor(t.pop / 1000) * 1000).toLocaleString('en-US')} people.`, 'good');
+    }
     const bankrupt = this.econ.closeMonth();
+    if (this.monthIndex % 12 === 0) {
+      this.econ.closeYear();
+      const year = this.date().year;
+      for (const m of Object.values(VEHICLES)) {
+        if (m.year === year) this.say(`New ${m.kind === 'freight' ? 'freight train' : m.kind}: ${m.name}, ${m.speed} km/h, ${m.capacity} ${m.carries === 'pax' ? 'seats' : 'units'}.`, 'info');
+      }
+    }
     this.events.push({ type: 'monthEnd', month: this.monthIndex });
     if (bankrupt) {
       this.over = { month: this.monthIndex };
@@ -434,6 +468,13 @@ export class World {
     this.queue(st, what, dest, n);
   }
 
+  /** Add a news item and show it. */
+  say(text: string, tone: News['tone']): void {
+    const item = { month: this.monthIndex, text, tone };
+    push(this.news, item, 60);
+    this.events.push({ type: 'news', news: item });
+  }
+
   private deliver(what: Freight, st: Stop, n: number): void {
     if (what === 'pax') {
       this.delivered += n;
@@ -443,7 +484,11 @@ export class World {
     this.deliveredCargo += n;
     const ind = st.industries.map((j) => this.industries[j]).find((i) => i.accepts === what);
     if (ind) ind.receivedMonth += n;
-    else if (st.town >= 0 && TOWN_CARGO.includes(what)) this.towns[st.town].supplyMonth += n;
+    else if (st.town >= 0 && TOWN_CARGO.includes(what)) {
+      const t = this.towns[st.town];
+      t.supplyMonth += n;
+      t.supplyBy[what] = (t.supplyBy[what] ?? 0) + n;
+    }
   }
 
   /** Pay for one leg of `n` travellers over a straight-line distance; returns the amount. */
@@ -471,7 +516,17 @@ export class World {
 
   // ---------- building: stops ----------
 
-  canPlaceStop(mode: Mode, pos: Vec2): string | null {
+  /** Where a stop tapped at `pos` actually goes: road stops in town sit on the nearest street. */
+  stopSpot(mode: Mode, pos: Vec2): Vec2 {
+    if (mode !== 'road' || !this.inTown(pos)) return pos;
+    const S = CONFIG.lot * CONFIG.streetEvery;
+    const sx = Math.round(pos.x / S) * S;
+    const sy = Math.round(pos.y / S) * S;
+    return Math.abs(pos.x - sx) < Math.abs(pos.y - sy) ? { x: sx, y: pos.y } : { x: pos.x, y: sy };
+  }
+
+  canPlaceStop(mode: Mode, at: Vec2): string | null {
+    const pos = this.stopSpot(mode, at);
     if (!isDry(this.map, pos, 20)) return 'Too close to water or the map edge';
     const spacing = CONFIG.stop[mode].minSpacing;
     for (const s of this.stops) {
@@ -481,9 +536,10 @@ export class World {
     return null;
   }
 
-  placeStop(mode: Mode, pos: Vec2): Stop | string {
-    const why = this.canPlaceStop(mode, pos);
+  placeStop(mode: Mode, at: Vec2): Stop | string {
+    const why = this.canPlaceStop(mode, at);
     if (why) return why;
+    const pos = this.stopSpot(mode, at);
     this.econ.spend('construction', CONFIG.stop[mode].price);
     const s: Stop = {
       id: this.nextId++,
@@ -499,6 +555,8 @@ export class World {
     };
     this.stops.push(s);
     this.stopIndex.set(s.id, s);
+    // A station needs room: the houses on its site make way.
+    if (mode === 'rail') this.clearLots(blockAlong(this.lots, [pos, pos], STATION_CLEARANCE));
     this.refreshCatchment();
     this.router.invalidate();
     this.networkVersion++;
@@ -605,6 +663,8 @@ export class World {
         carriedMonth: 0,
         carriedLast: 0,
         departed: { pax: -1e9, cargo: -1e9 },
+        fullLoad: false,
+        history: [],
       };
       this.lines.push(line);
     }
@@ -672,6 +732,11 @@ export class World {
   private demolishUnder(ways: Way[]): void {
     const gone = new Set<number>();
     for (const w of ways) blockAlong(this.lots, w.path, wayClearance(w)).forEach((k) => gone.add(k));
+    this.clearLots(gone);
+  }
+
+  /** Remove the houses standing on these lots. */
+  private clearLots(gone: Set<number>): void {
     const key = (h: House) => lotKey(Math.round(h.pos.x / CONFIG.lot), Math.round(h.pos.y / CONFIG.lot));
     const before = this.houses.length;
     this.houses = this.houses.filter((h) => {
@@ -691,20 +756,33 @@ export class World {
 
   // ---------- vehicles ----------
 
-  canAddVehicle(lineId: number, carries: Carries = 'pax'): string | null {
+  /** The model `what` names: 'pax' or 'cargo' for the newest of that service, or a model id. */
+  private modelFor(line: Line, what: Carries | string): VehicleType | string {
+    const year = this.date().year;
+    if (what === 'pax' || what === 'cargo') return vehicleFor(line.mode, what, year);
+    const m = VEHICLES[what];
+    if (!m || m.mode !== line.mode) return 'That vehicle cannot run on this line';
+    if (m.year > year) return `${m.name} is available from ${m.year}`;
+    return m;
+  }
+
+  canAddVehicle(lineId: number, what: Carries | string = 'pax'): string | null {
     const line = this.lineById(lineId);
     if (!line) return 'No such line';
-    const type = vehicleFor(line.mode, carries);
+    const type = this.modelFor(line, what);
+    if (typeof type === 'string') return type;
     if (this.vehiclesOn(lineId).length >= CONFIG.maxVehiclesPerLine) return 'This line is full';
     if (this.econ.cash < type.price) return `Need ${money(type.price)}`;
     return null;
   }
 
-  addVehicle(lineId: number, carries: Carries = 'pax'): Vehicle | string {
-    const why = this.canAddVehicle(lineId, carries);
+  /** Buy a vehicle for a line: 'pax' or 'cargo' buys the newest model of that service, or name a model id. */
+  addVehicle(lineId: number, what: Carries | string = 'pax'): Vehicle | string {
+    const why = this.canAddVehicle(lineId, what);
     if (why) return why;
     const line = this.lineById(lineId)!;
-    const type = vehicleFor(line.mode, carries);
+    const type = this.modelFor(line, what) as VehicleType;
+    const carries = type.carries;
     this.econ.spend('vehicles', type.price);
     // Spread vehicles along the line instead of stacking them at the first stop.
     const k = this.vehiclesOn(lineId, carries).length;
@@ -735,6 +813,8 @@ export class World {
       stopping: true,
       load: [],
       odo: 0,
+      bornAt: this.time,
+      held: 0,
     };
     dock(v, st);
     this.vehicles.push(v);
@@ -753,9 +833,62 @@ export class World {
 
   retireVehicle(v: Vehicle, at: Stop): void {
     this.unload(v, at, () => true);
-    this.econ.refund(v.type.price * CONFIG.sellRefund);
+    this.econ.refund(this.saleValue(v));
     this.vehicles.splice(this.vehicles.indexOf(v), 1);
     this.router.invalidate();
+  }
+
+  /** Years since the vehicle was bought or last renewed. */
+  ageYears(v: Vehicle): number {
+    return (this.time - v.bornAt) / (CONFIG.monthSeconds * 12);
+  }
+
+  /** Monthly running cost, rising with age. */
+  runningCost(v: Vehicle): number {
+    return v.type.runningPerMonth * (1 + CONFIG.aging.costPerYear * this.ageYears(v));
+  }
+
+  /** What the vehicle sells for now. */
+  saleValue(v: Vehicle): number {
+    const a = CONFIG.aging;
+    return v.type.price * Math.max(a.minValue, CONFIG.sellRefund - a.valueLossPerYear * this.ageYears(v));
+  }
+
+  /** The model a vehicle would be renewed with, and what that costs after selling the old one. */
+  renewal(v: Vehicle): { model: VehicleType; cost: number } {
+    const model = vehicleFor(v.type.mode, v.type.carries, this.date().year);
+    return { model, cost: model.price - this.saleValue(v) };
+  }
+
+  /**
+   * Replace a line's vehicles that are a year old or older, or not the newest model, with the
+   * newest model, in place. Stops when cash runs out. Returns how many were renewed.
+   */
+  renewVehicles(lineId: number): number {
+    let n = 0;
+    for (const v of this.vehiclesOn(lineId)) {
+      const { model, cost } = this.renewal(v);
+      if (model.key === v.type.key && this.ageYears(v) < 1) continue;
+      if (cost > this.econ.cash) break;
+      if (cost >= 0) this.econ.spend('vehicles', cost);
+      else this.econ.refund(-cost);
+      v.type = model;
+      v.bornAt = this.time;
+      n++;
+    }
+    if (n) this.router.invalidate();
+    return n;
+  }
+
+  setFullLoad(lineId: number, on: boolean): void {
+    const line = this.lineById(lineId);
+    if (line) line.fullLoad = on;
+  }
+
+  /** Models of a service this line could buy now, oldest first. */
+  modelsForLine(lineId: number, carries: Carries): VehicleType[] {
+    const line = this.lineById(lineId);
+    return line ? modelsFor(line.mode, carries).filter((m) => m.year <= this.date().year) : [];
   }
 
   // ---------- saving ----------
@@ -777,11 +910,22 @@ export class World {
       deliveredCargo: this.deliveredCargo,
       networkVersion: this.networkVersion,
       over: this.over,
-      econ: { cash: e.cash, loan: e.loan, month: e.month, last: e.last, negativeMonths: e.negativeMonths, price: e.price },
+      news: this.news,
+      econ: {
+        cash: e.cash,
+        loan: e.loan,
+        month: e.month,
+        last: e.last,
+        year: e.year,
+        lastYear: e.lastYear,
+        history: e.history,
+        negativeMonths: e.negativeMonths,
+        price: e.price,
+      },
       towns: this.towns,
       districts: this.districts,
       industries: this.industries,
-      houses: this.houses.map((h) => [h.pos.x, h.pos.y, h.residents, h.town, h.district, h.roof]),
+      houses: this.houses.map((h) => [h.pos.x, h.pos.y, h.residents, h.town, h.district, h.roof, h.shop ? 1 : 0]),
       stops: this.stops.map((s) => ({ id: s.id, mode: s.mode, pos: s.pos, name: s.name, waiting: s.waiting, bornAt: s.bornAt })),
       lines: this.lines,
       vehicles: this.vehicles.map((v) => ({ ...v, type: v.type.key })),
@@ -792,9 +936,11 @@ export class World {
   /** Rebuild a world from save(); null when the save is unreadable or from another version or map. */
   static load(map: MapDef, json: string): World | null {
     try {
-      const d = JSON.parse(json);
-      if (d?.v !== SAVE_VERSION || d.map !== map.name) return null;
-      const w = new World(map, d.seed);
+      const raw = JSON.parse(json);
+      if (raw?.map !== map.name) return null;
+      const w = new World(map, raw.seed);
+      const d = upgrade(raw, w);
+      if (!d) return null;
       w.rng.state = d.rng;
       w.time = d.time;
       w.nextId = d.nextId;
@@ -803,20 +949,23 @@ export class World {
       w.lost = d.lost;
       w.delivered = d.delivered;
       w.deliveredCargo = d.deliveredCargo;
+      w.news = d.news;
       w.networkVersion = d.networkVersion;
       w.over = d.over;
       Object.assign(w.econ, d.econ);
       w.towns = d.towns;
       w.districts = d.districts;
       w.industries = d.industries;
-      w.houses = (d.houses as number[][]).map(([x, y, residents, town, district, roof]) => ({ pos: { x, y }, residents, town, district, stop: -1, roof }));
+      w.houses = (d.houses as number[][]).map(([x, y, residents, town, district, roof, shop]) => ({ pos: { x, y }, residents, town, district, stop: -1, roof, shop: shop === 1 }));
       w.lots.used = new Set(w.houses.map((h) => lotKey(Math.round(h.pos.x / CONFIG.lot), Math.round(h.pos.y / CONFIG.lot))));
       w.stops = (d.stops as Pick<Stop, 'id' | 'mode' | 'pos' | 'name' | 'waiting' | 'bornAt'>[]).map((s) => ({ ...s, covers: new Set(), residents: 0, town: -1, industries: [] }));
       w.stopIndex = new Map(w.stops.map((s) => [s.id, s]));
       w.lines = d.lines;
-      w.vehicles = (d.vehicles as (Omit<Vehicle, 'type'> & { type: VehicleKey })[]).map((v) => ({ ...v, type: VEHICLES[v.type] }));
+      w.vehicles = (d.vehicles as (Omit<Vehicle, 'type'> & { type: string })[]).map((v) => ({ ...v, type: VEHICLES[v.type] }));
+      if (w.vehicles.some((v) => !v.type)) return null;
       w.ways = new Map((d.ways as Way[]).map((x) => [x.key, x]));
       for (const way of w.ways.values()) blockAlong(w.lots, way.path, wayClearance(way));
+      for (const st of w.stops) if (st.mode === 'rail') blockAlong(w.lots, [st.pos, st.pos], STATION_CLEARANCE);
       w.refreshCatchment();
       w.router.invalidate();
       return w;
@@ -829,7 +978,7 @@ export class World {
 
   /** Cash minus loan plus what the fleet would sell for. */
   companyValue(): number {
-    return this.econ.cash - this.econ.loan + this.vehicles.reduce((n, v) => n + v.type.price * CONFIG.sellRefund, 0);
+    return this.econ.cash - this.econ.loan + this.vehicles.reduce((n, v) => n + this.saleValue(v), 0);
   }
 
   coverage(): number {
@@ -854,4 +1003,30 @@ export function money(n: number): string {
   if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(a >= 1e7 ? 1 : 2)}M`;
   if (a >= 1e3) return `${sign}$${Math.round(a / 1e3)}k`;
   return `${sign}$${Math.round(a)}`;
+}
+
+/**
+ * Bring an older save up to the current layout, or null when it is too old.
+ * Version 2 (passenger and freight flows, no vehicle models) gains the oil chain,
+ * 1950 vehicle models, and empty histories.
+ */
+function upgrade(d: any, fresh: World): any | null {
+  if (d.v === SAVE_VERSION) return d;
+  if (d.v !== 2) return null;
+  const model: Record<string, string> = { train: 'steam', freight: 'goods', bus: 'bus', truck: 'truck' };
+  return {
+    ...d,
+    v: SAVE_VERSION,
+    news: [],
+    towns: d.towns.map((t: any) => ({ supplyBy: {}, supplyLastBy: {}, history: [], ...t })),
+    industries: fresh.industries.map((ind, i) => (d.industries[i] ? { history: [], notedRate: d.industries[i].rate, ...d.industries[i] } : ind)),
+    lines: d.lines.map((l: any) => ({ fullLoad: false, history: [], ...l })),
+    vehicles: d.vehicles.map((v: any) => ({ ...v, type: model[v.type] ?? v.type, bornAt: d.time, held: 0 })),
+  };
+}
+
+/** Append to a rolling history, keeping the last `max` entries. */
+function push<T>(arr: T[], x: T, max: number): void {
+  arr.push(x);
+  if (arr.length > max) arr.shift();
 }

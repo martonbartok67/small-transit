@@ -1,13 +1,14 @@
 import { Audio } from './audio';
-import { Renderer } from './render/renderer';
+import { Renderer, type Layer } from './render/renderer';
 import { CONFIG } from './sim/config';
 import { Economy } from './sim/economy';
 import { v } from './sim/geom';
 import { VALLEY } from './sim/maps/valley';
+import { vehiclePose } from './sim/vehicles';
 import { money, World } from './sim/world';
 import { Camera } from './ui/camera';
 import { Editor } from './ui/editor';
-import { Hud, MONTHS } from './ui/hud';
+import { Hud, LAYERS, MONTHS } from './ui/hud';
 
 const STEP = 1 / 60;
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -48,6 +49,10 @@ const storage = {
 };
 
 let saved = storage.get(SAVE_KEY) !== null;
+const savedLayer = storage.get('st-layer') as Layer | null;
+let layer: Layer = LAYERS.some((l) => l.layer === savedLayer) ? savedLayer! : 'lines';
+/** Vehicle the camera follows, or -1. */
+let follow = -1;
 let saveWarned = false;
 /** Keep the running company in storage; a bankrupt one is forgotten. */
 function persist(): void {
@@ -80,6 +85,11 @@ const editor = new Editor(() => world, cam, {
 
 const hud = new Hud(document.getElementById('hud')!, {
   setSpeed: (s) => (speed = s),
+  setLayer: (l) => {
+    layer = l;
+    storage.set('st-layer', l);
+  },
+  follow: (id) => (follow = id),
   setTool: (t) => {
     editor.tool = editor.tool === t && t !== 'select' ? 'select' : t;
     if (editor.tool === 'rail' || editor.tool === 'road') {
@@ -114,12 +124,22 @@ const hud = new Hud(document.getElementById('hud')!, {
     }
   },
   sheetChanged: (s) => (editor.selectedLine = s?.kind === 'line' ? s.id : -1),
-  focus: ({ stop }) => {
-    const s = stop !== undefined ? world.stopById(stop) : undefined;
-    if (!s) return;
-    const p = cam.toScreen(s.pos);
+  focus: ({ stop, line, town, industry }) => {
+    const l = line !== undefined ? world.lineById(line) : undefined;
+    const at =
+      stop !== undefined
+        ? world.stopById(stop)?.pos
+        : town !== undefined
+          ? world.towns[town]?.center
+          : industry !== undefined
+            ? world.industries[industry]?.pos
+            : l
+              ? world.stopById(l.stops[0])?.pos
+              : undefined;
+    if (!at) return;
+    const p = cam.toScreen(at);
     const vp = cam.viewport;
-    if (p.x < vp.x || p.x > vp.x + vp.w || p.y < vp.y || p.y > vp.y + vp.h) cam.lookAt(s.pos);
+    if (p.x < vp.x || p.x > vp.x + vp.w || p.y < vp.y || p.y > vp.y + vp.h) cam.lookAt(at);
   },
 });
 
@@ -132,6 +152,7 @@ function begin(w: World): void {
   cam.lookAt(v(-900, 0), Math.max(cam.minZoom, cam.viewport.w / 2600));
   started = true;
   speed = 1;
+  follow = -1;
 }
 
 // ---------- input: one finger edits or pans, two fingers pinch and pan ----------
@@ -148,6 +169,10 @@ const midDist = () => {
 canvas.addEventListener('pointerdown', (e) => {
   if (!started || world.over || hud.helpOpen) return;
   audio.unlock();
+  if (follow >= 0) {
+    follow = -1;
+    hud.toast('Stopped following');
+  }
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1) {
@@ -250,6 +275,8 @@ function frame(now: number) {
     } else if (ev.type === 'monthEnd') {
       if (Economy.net(world.econ.last) > 0) audio.weekEnd();
       persist();
+    } else if (ev.type === 'news') {
+      hud.toast(ev.news.text, 3000);
     } else if (ev.type === 'bankrupt') {
       persist();
       audio.gameOver();
@@ -258,7 +285,13 @@ function frame(now: number) {
     }
   }
   world.events.length = 0;
-  hud.update({ world, speed, tool: editor.tool, started, saved });
+  hud.update({ world, speed, tool: editor.tool, layer, started, saved }, now);
+  if (follow >= 0) {
+    const v = world.vehicles.find((x) => x.id === follow);
+    if (v) cam.lookAt(vehiclePose(v).p);
+    else follow = -1;
+  }
+  renderer.layer = layer;
   renderer.insets = hud.insets();
   renderer.draw(world, editor, now);
   requestAnimationFrame(frame);

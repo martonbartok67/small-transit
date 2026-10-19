@@ -114,9 +114,13 @@ export class Terrain {
     if (dist(a, b) < this.cell * 1.5) return [a, b];
     const n = this.cols * this.rows;
     const unit = new Float32Array(n);
+    // Inside towns, roads run along the street grid: no diagonal moves there (except along a country road).
+    const grid = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / this.cols);
-      unit[i] = this.unitCost(mode, this.center(i - r * this.cols, r), inTown) + LENGTH_BIAS[mode];
+      const p = this.center(i - r * this.cols, r);
+      unit[i] = this.unitCost(mode, p, inTown) + LENGTH_BIAS[mode];
+      grid[i] = mode === 'road' && !this.road[i] && inTown(p) ? 1 : 0;
     }
     const start = this.cellOf(a);
     const goal = this.cellOf(b);
@@ -145,6 +149,7 @@ export class Terrain {
           if (nx < 0 || ny < 0 || nx >= this.cols || ny >= this.rows) continue;
           const nb = ny * this.cols + nx;
           if (closed[nb]) continue;
+          if (dx && dy && (grid[cur] || grid[nb])) continue;
           const step = (dx && dy ? Math.SQRT2 : 1) * this.cell;
           const cost = g[cur] + ((unit[cur] + unit[nb]) / 2) * step;
           if (cost < g[nb]) {
@@ -167,7 +172,7 @@ export class Terrain {
       if (this.road[i]) return this.snapToRoad(p);
       return inTown(p) ? this.snapToStreet(p) : p;
     });
-    return smooth(this.straighten(mode, [a, ...mid, b], inTown), mode === 'rail' ? 140 : 24);
+    return smooth(this.straighten(mode, [a, ...mid, b], inTown), mode === 'rail' ? 140 : 14);
   }
 
   /** Drop grid points wherever a straight cut costs no more than the stair-stepped route. */

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CONFIG } from '../src/sim/config';
+import { availableModels, CONFIG } from '../src/sim/config';
+import { townRadius } from '../src/sim/towns';
+import { loadOf } from '../src/sim/vehicles';
 import { Economy } from '../src/sim/economy';
 import { dist, v } from '../src/sim/geom';
 import { VALLEY } from '../src/sim/maps/valley';
@@ -23,11 +25,28 @@ describe('towns', () => {
     expect(a.houses.every((h) => h.pos.x % CONFIG.lot === 0 && h.pos.y % CONFIG.lot === 0)).toBe(true);
   });
 
+  it('builds compact towns with a downtown', () => {
+    const w = new World(VALLEY, 2);
+    for (const t of w.towns) {
+      const mine = w.houses.filter((h) => h.town === t.id);
+      const inside = mine.filter((h) => dist(h.pos, t.center) < townRadius(t.pop) * 1.2).length;
+      expect(inside / mine.length).toBeGreaterThan(0.95);
+      expect(mine.some((h) => h.shop)).toBe(true);
+      expect(mine.filter((h) => h.shop).every((h) => dist(h.pos, t.center) < townRadius(t.pop) * 0.4)).toBe(true);
+    }
+  });
+
   it('levels off instead of growing without limit', () => {
     const w = new World(VALLEY, 3);
     runMonths(w, 20 * 12, sensible);
     expect(w.over).toBeNull();
     for (const t of w.towns) expect(t.pop).toBeLessThanOrEqual(t.basePop * CONFIG.growth.capFactor * 1.02);
+    expect(w.econ.history.length).toBe(36);
+    expect(w.towns.every((t) => t.history.length === 36)).toBe(true);
+    expect(w.lines.every((l) => l.history.length <= 24)).toBe(true);
+    expect(w.news.length).toBeGreaterThan(5);
+    expect(w.news.length).toBeLessThanOrEqual(60);
+    expect(w.vehicles.some((x) => x.type.year > CONFIG.startYear)).toBe(true); // the bot modernised
     // Stops are not permanently overflowing.
     const full = w.stops.filter((s) => w.waitingTotal(s) >= CONFIG.stop[s.mode].capacity * 0.95);
     expect(full.length).toBeLessThanOrEqual(Math.ceil(w.stops.length * 0.2));
@@ -152,6 +171,27 @@ describe('cargo', () => {
     expect(l1.profitLast + l2.profitLast).toBeGreaterThan(0);
   });
 
+  it('runs an oil well to refinery to town chain that supplies fuel', () => {
+    const w = new World(VALLEY, 1);
+    w.econ.cash = 1e8;
+    const well = near(w, 'oilwell');
+    const refinery = near(w, 'refinery');
+    const a = must(w.placeStop('rail', v(well.pos.x + 120, well.pos.y - 150)));
+    const b = must(w.placeStop('rail', v(refinery.pos.x - 150, refinery.pos.y - 120)));
+    const town = w.towns[5];
+    const c = must(w.placeStop('road', v(refinery.pos.x + 60, refinery.pos.y - 200)));
+    const d = must(w.placeStop('road', town.center));
+    const rail = must(w.commitLine(null, 'rail', [a.id, b.id], false));
+    must(w.addVehicle(rail.id, 'cargo'));
+    const road = must(w.commitLine(null, 'road', [c.id, d.id], false));
+    must(w.addVehicle(road.id, 'cargo'));
+    must(w.addVehicle(road.id, 'cargo'));
+    expect(dist(b.pos, c.pos)).toBeGreaterThan(CONFIG.walkRange); // the refinery ships from its own road stop
+    runMonths(w, 8);
+    expect(refinery.receivedLast + refinery.history.slice(-3).reduce((n, x) => n + x, 0)).toBeGreaterThan(0);
+    expect(town.supplyLastBy.fuel ?? 0).toBeGreaterThan(0);
+  });
+
   it('only buses carry passengers and only trucks carry cargo', () => {
     const w = new World(VALLEY, 1);
     const farm = near(w, 'farm');
@@ -178,6 +218,75 @@ describe('cargo', () => {
     runMonths(w, 12);
     expect(farm.rate).toBeGreaterThan(CONFIG.industry.start);
     expect(idle.rate).toBeLessThan(CONFIG.industry.start);
+  });
+});
+
+describe('vehicles over the years', () => {
+  /** Jump the clock to the start of `year` (one month close, no simulation in between). */
+  const jumpTo = (w: World, year: number) => {
+    w.time = (year - CONFIG.startYear) * 12 * CONFIG.monthSeconds + 0.01;
+    w.step(1 / 60);
+  };
+
+  it('unlocks newer models by year and refuses them before', () => {
+    const w = new World(VALLEY, 1);
+    w.econ.cash = 1e8;
+    const a = must(w.placeStop('rail', w.towns[0].center));
+    const b = must(w.placeStop('rail', w.towns[4].center));
+    const line = must(w.commitLine(null, 'rail', [a.id, b.id], false));
+    expect(w.modelsForLine(line.id, 'pax').map((m) => m.key)).toEqual(['steam']);
+    expect(w.addVehicle(line.id, 'railcar')).toMatch(/available from 1962/);
+    expect(w.addVehicle(line.id, 'bus')).toMatch(/cannot run/);
+    jumpTo(w, 1962);
+    expect(w.date().year).toBe(1962);
+    expect(w.news.some((n) => n.text.includes('Diesel Railcar'))).toBe(true);
+    expect(availableModels('rail', 'pax', 1962).map((m) => m.key)).toEqual(['steam', 'railcar']);
+    expect(must(w.addVehicle(line.id, 'railcar')).type.name).toBe('Diesel Railcar');
+    expect(must(w.addVehicle(line.id)).type.key).toBe('railcar'); // 'pax' buys the newest
+  });
+
+  it('costs more to run and sells for less as it ages, and renewal replaces it', () => {
+    const w = new World(VALLEY, 1);
+    w.econ.cash = 1e8;
+    const a = must(w.placeStop('rail', w.towns[0].center));
+    const b = must(w.placeStop('rail', w.towns[4].center));
+    const line = must(w.commitLine(null, 'rail', [a.id, b.id], false));
+    const v = must(w.addVehicle(line.id));
+    const fresh = { run: w.runningCost(v), value: w.saleValue(v) };
+    expect(fresh.value).toBeCloseTo(v.type.price * CONFIG.sellRefund);
+    jumpTo(w, 1960);
+    expect(w.ageYears(v)).toBeCloseTo(10, 1);
+    expect(w.runningCost(v)).toBeCloseTo(fresh.run * (1 + 10 * CONFIG.aging.costPerYear), -2);
+    expect(w.saleValue(v)).toBeLessThan(fresh.value * 0.5);
+    jumpTo(w, 1963);
+    const cash = w.econ.cash;
+    const { model, cost } = w.renewal(v);
+    expect(model.key).toBe('railcar');
+    expect(w.renewVehicles(line.id)).toBe(1);
+    expect(v.type.key).toBe('railcar');
+    expect(w.ageYears(v)).toBeCloseTo(0, 2);
+    expect(w.econ.cash).toBeCloseTo(cash - cost);
+    expect(w.renewVehicles(line.id)).toBe(0); // nothing left to renew
+  });
+
+  it('waits for a full load at the first stop when asked', () => {
+    const w = new World(VALLEY, 1);
+    const farm = near(w, 'farm');
+    const plant = near(w, 'foodplant');
+    const a = must(w.placeStop('road', v(farm.pos.x + 80, farm.pos.y)));
+    const b = must(w.placeStop('road', v(plant.pos.x + 80, plant.pos.y)));
+    const l = must(w.commitLine(null, 'road', [a.id, b.id], false));
+    w.setFullLoad(l.id, true);
+    const t = must(w.addVehicle(l.id, 'cargo'));
+    const departures: number[] = [];
+    let was = t.state;
+    for (let i = 0; i < 6 * CONFIG.monthSeconds * 60; i++) {
+      w.step(1 / 60);
+      if (was === 'dwelling' && t.state === 'moving' && t.fromIdx === 0) departures.push(loadOf(t));
+      was = t.state;
+    }
+    expect(departures.length).toBeGreaterThan(1);
+    for (const d of departures) expect(d).toBeGreaterThan(t.type.capacity - 0.6);
   });
 });
 
@@ -296,8 +405,35 @@ describe('saving', () => {
     expect(back.delivered).toBeGreaterThan(delivered);
   }, 60_000);
 
+  it('upgrades a save from the previous version', () => {
+    const w = new World(VALLEY, 7);
+    runMonths(w, 10, sensible);
+    const d = JSON.parse(w.save());
+    // Reshape into the version 2 layout: no models, histories, news or oil chain.
+    const old = {
+      ...d,
+      v: 2,
+      news: undefined,
+      econ: { cash: d.econ.cash, loan: d.econ.loan, month: d.econ.month, last: d.econ.last, negativeMonths: d.econ.negativeMonths, price: d.econ.price },
+      towns: d.towns.map(({ supplyBy, supplyLastBy, history, ...t }: Record<string, unknown>) => t),
+      industries: d.industries.slice(0, 6).map(({ history, notedRate, ...i }: Record<string, unknown>) => i),
+      lines: d.lines.map(({ fullLoad, history, ...l }: Record<string, unknown>) => l),
+      vehicles: d.vehicles.map(({ bornAt, held, ...x }: Record<string, unknown>) => ({ ...x, type: { steam: 'train', goods: 'freight' }[x.type as string] ?? x.type })),
+      houses: d.houses.map((h: number[]) => h.slice(0, 6)),
+    };
+    const back = must(World.load(VALLEY, JSON.stringify(old)) ?? 'old save refused');
+    expect(back.industries.length).toBe(VALLEY.industries.length);
+    expect(back.vehicles.map((x) => x.type.key).sort()).toEqual(w.vehicles.map((x) => x.type.key).sort());
+    expect(back.econ.cash).toBeCloseTo(w.econ.cash);
+    const delivered = back.delivered;
+    runMonths(back, 4, sensible);
+    expect(back.over).toBeNull();
+    expect(back.delivered).toBeGreaterThan(delivered);
+    expect(back.lines.every((l) => Array.isArray(l.history))).toBe(true);
+  }, 60_000);
+
   it('ignores saves it cannot read', () => {
     expect(World.load(VALLEY, 'not json')).toBeNull();
-    expect(World.load(VALLEY, JSON.stringify({ v: 1 }))).toBeNull();
+    expect(World.load(VALLEY, JSON.stringify({ v: 1, map: 'Valley' }))).toBeNull();
   });
 });

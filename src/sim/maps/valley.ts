@@ -9,7 +9,7 @@ const P = (pts: [number, number][]): Vec2[] => pts.map(([x, y]) => v(x, y));
 
 /**
  * Original map: a river splits three western towns from three eastern ones.
- * Country roads already join the towns; farms and forests feed a food plant and a sawmill.
+ * Country roads already join the towns; farms, forests and an oil well feed a food plant, a sawmill and a refinery.
  * World units, y down.
  */
 export const VALLEY: MapDef = {
@@ -62,5 +62,7 @@ export const VALLEY: MapDef = {
     { kind: 'forest', name: 'North Woods', pos: v(-100, -1600) },
     { kind: 'forest', name: 'Eastwood', pos: v(2500, 1450) },
     { kind: 'sawmill', name: 'Carlow Sawmill', pos: v(1500, -650) },
+    { kind: 'oilwell', name: 'Mirror Lake Oil', pos: v(-1500, 1700) },
+    { kind: 'refinery', name: 'Southport Refinery', pos: v(1250, 1800) },
   ],
 };

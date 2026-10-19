@@ -21,13 +21,25 @@ export const isDry = (map: MapDef, p: Vec2, margin = 30) =>
   Math.abs(p.x) < map.halfW - 40 &&
   Math.abs(p.y) < map.halfH - 40;
 
-export const townRadius = (pop: number) => 120 + Math.sqrt(pop) * 9;
+/** Radius of the built-up area of a town of this population (houses fill blocks densely). */
+export const townRadius = (pop: number) => 40 + Math.sqrt(pop) * 8;
+
+/** Inside this share of the radius, buildings are shops and offices rather than houses. */
+const DOWNTOWN = 0.32;
+
+const mod = (g: number) => ((g % CONFIG.streetEvery) + CONFIG.streetEvery) % CONFIG.streetEvery;
+/** Lots on the edge of a block face a street. */
+const facesStreet = (gx: number, gy: number) => [1, CONFIG.streetEvery - 1].includes(mod(gx)) || [1, CONFIG.streetEvery - 1].includes(mod(gy));
+
+/** Lower is built first: near the centre, street frontage before back lots, with some noise. */
+const lotScore = (center: Vec2, gx: number, gy: number, noise: number) =>
+  Math.hypot(gx * CONFIG.lot - center.x, gy * CONFIG.lot - center.y) * (1 + 0.35 * noise) - (facesStreet(gx, gy) ? 40 : 0);
 
 /** Lot index for a world point; houses occupy whole lots. */
 export const lotKey = (gx: number, gy: number) => gx * 100_003 + gy;
 
 /** True when lot line g is a street. */
-export const isStreet = (g: number) => ((g % CONFIG.streetEvery) + CONFIG.streetEvery) % CONFIG.streetEvery === 0;
+export const isStreet = (g: number) => mod(g) === 0;
 
 /** Lots that hold houses, and lots kept clear for roads and track. */
 export interface Lots {
@@ -40,16 +52,40 @@ export function buildTowns(map: MapDef, rng: Rng, lots: Lots): { towns: Town[]; 
   const districts: District[] = [];
   const houses: House[] = [];
   map.towns.forEach((def, id) => {
-    towns.push({ id, name: def.name, center: def.center, pop: 0, basePop: def.pop, tripsMonth: 0, tripsLast: 0, supplyMonth: 0, supplyLast: 0, growthLast: 0 });
+    towns.push({
+      id,
+      name: def.name,
+      center: def.center,
+      pop: 0,
+      basePop: def.pop,
+      tripsMonth: 0,
+      tripsLast: 0,
+      supplyMonth: 0,
+      supplyLast: 0,
+      supplyBy: {},
+      supplyLastBy: {},
+      growthLast: 0,
+      history: [],
+    });
     for (const d of DISTRICT_LAYOUT[def.districts]) {
       districts.push({ id: districts.length, town: id, name: def.name + d.suffix, center: v(def.center.x + d.off.x, def.center.y + d.off.y), pop: 0 });
     }
-    const radius = townRadius(def.pop);
+    // Fill lots outward from the centre, street frontage first, until the town has its people.
+    const radius = townRadius(def.pop) * 1.4;
+    const c = def.center;
+    const cand: { gx: number; gy: number; score: number }[] = [];
+    for (let gx = Math.ceil((c.x - radius) / CONFIG.lot); gx * CONFIG.lot <= c.x + radius; gx++) {
+      for (let gy = Math.ceil((c.y - radius) / CONFIG.lot); gy * CONFIG.lot <= c.y + radius; gy++) {
+        cand.push({ gx, gy, score: lotScore(c, gx, gy, rng.next()) });
+      }
+    }
+    cand.sort((a, b) => a.score - b.score);
+    const downtown = townRadius(def.pop) * DOWNTOWN;
     let pop = 0;
-    for (let tries = 0; pop < def.pop && tries < def.pop * 6; tries++) {
-      const r = Math.sqrt(rng.next()) * radius;
-      const a = rng.next() * Math.PI * 2;
-      const h = placeHouse(map, houses, districts, lots, id, v(def.center.x + Math.cos(a) * r, def.center.y + Math.sin(a) * r), rng);
+    for (const k of cand) {
+      if (pop >= def.pop) break;
+      const p = v(k.gx * CONFIG.lot, k.gy * CONFIG.lot);
+      const h = placeHouse(map, houses, districts, lots, id, p, rng, dist(p, c) < downtown && rng.next() < 0.85);
       if (h) pop += h.residents;
     }
   });
@@ -58,7 +94,7 @@ export function buildTowns(map: MapDef, rng: Rng, lots: Lots): { towns: Town[]; 
 }
 
 /** Add a house on the free lot nearest `at`; returns it or null when the lot is taken, a street or wet. */
-export function placeHouse(map: MapDef, houses: House[], districts: District[], lots: Lots, town: number, at: Vec2, rng: Rng): House | null {
+export function placeHouse(map: MapDef, houses: House[], districts: District[], lots: Lots, town: number, at: Vec2, rng: Rng, shop = false): House | null {
   const gx = Math.round(at.x / CONFIG.lot);
   const gy = Math.round(at.y / CONFIG.lot);
   const key = lotKey(gx, gy);
@@ -76,7 +112,7 @@ export function placeHouse(map: MapDef, houses: House[], districts: District[], 
     }
   }
   const [lo, hi] = CONFIG.houseResidents;
-  const h: House = { pos: p, residents: lo + rng.int(hi - lo + 1), town, district: best, stop: -1, roof: rng.int(4) };
+  const h: House = { pos: p, residents: lo + rng.int(hi - lo + 1), town, district: best, stop: -1, roof: rng.int(4), shop };
   houses.push(h);
   lots.used.add(key);
   return h;
@@ -177,11 +213,22 @@ export function growTown(map: MapDef, town: Town, houses: House[], districts: Di
   const room = Math.max(0, 1 - town.pop / (g.capFactor * town.basePop));
   let target = town.pop * (g.base + g.passengers * covered * activity + g.cargo * supply) * room;
   let added = 0;
-  for (let tries = 0; target > 0 && tries < 300; tries++) {
-    const near = rng.pick(mine).pos;
-    const a = rng.next() * Math.PI * 2;
-    const r = 20 + rng.next() * 40;
-    const h = placeHouse(map, houses, districts, lots, town.id, v(near.x + Math.cos(a) * r, near.y + Math.sin(a) * r), rng);
+  const downtown = townRadius(town.pop) * DOWNTOWN;
+  // Each new house goes on the best of a handful of free lots next to existing ones: infill first, then outward.
+  for (let tries = 0; target > 0 && tries < 200; tries++) {
+    let best: { gx: number; gy: number; score: number } | null = null;
+    for (let k = 0; k < 12; k++) {
+      const near = rng.pick(mine).pos;
+      const gx = Math.round((near.x + (rng.next() - 0.5) * 144) / CONFIG.lot);
+      const gy = Math.round((near.y + (rng.next() - 0.5) * 144) / CONFIG.lot);
+      const key = lotKey(gx, gy);
+      if (isStreet(gx) || isStreet(gy) || lots.used.has(key) || lots.blocked.has(key)) continue;
+      const score = lotScore(town.center, gx, gy, rng.next());
+      if (!best || score < best.score) best = { gx, gy, score };
+    }
+    if (!best) continue;
+    const p = v(best.gx * CONFIG.lot, best.gy * CONFIG.lot);
+    const h = placeHouse(map, houses, districts, lots, town.id, p, rng, dist(p, town.center) < downtown && rng.next() < 0.85);
     if (!h) continue;
     mine.push(h);
     target -= h.residents;

@@ -1,3 +1,4 @@
+import { CONFIG } from './config';
 import { dist, pointAt, type Vec2 } from './geom';
 import { departDir, nextIdx, roundTrip, segIndex } from './router';
 import type { Line, Stop, Vehicle } from './types';
@@ -136,6 +137,15 @@ function updateDwell(w: World, t: Vehicle, dt: number): void {
     t.dockedAt = null;
     return rejoin(w, t, line, st, 0);
   }
+  // With full load on, wait at the first stop until full (or until the wait limit).
+  if (t.fromIdx === 0 && line.fullLoad) {
+    w.board(t, line, st, t.dir);
+    if (loadOf(t) < t.type.capacity - 0.5 && t.held < CONFIG.fullLoadMaxMonths * CONFIG.monthSeconds) {
+      t.held += 0.5;
+      t.dwell = 0.5;
+      return;
+    }
+  }
   // Hold at the first stop until the previous vehicle of the same kind is a fair share of a round trip ahead.
   if (t.fromIdx === 0) {
     const fleet = w.vehiclesOn(line.id, t.type.carries).length;
@@ -148,6 +158,7 @@ function updateDwell(w: World, t: Vehicle, dt: number): void {
     line.departed[t.type.carries] = w.time;
   }
   w.board(t, line, st, t.dir); // top up with whoever arrived while it stood
+  t.held = 0;
   t.dockedAt = null;
   startSegment(t, line, 0);
 }
