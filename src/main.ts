@@ -17,6 +17,10 @@ const renderer = new Renderer(canvas, cam);
 const audio = new Audio();
 
 const SAVE_KEY = 'st-save';
+/** Wall-clock time of the last save, for income earned while the app was closed. */
+const AWAY_KEY = 'st-saved-at';
+/** Away income offered on the card and not yet collected. */
+let pendingAway = 0;
 const newWorld = () => new World(VALLEY, (Math.random() * 2 ** 31) | 0);
 let world = newWorld();
 let speed = 0;
@@ -72,10 +76,25 @@ function persist(): void {
     return;
   }
   saved = storage.set(SAVE_KEY, world.save());
+  if (saved) storage.set(AWAY_KEY, String(Date.now()));
   if (!saved && !saveWarned) {
     saveWarned = true;
     hud.toast('Could not save: browser storage is unavailable or full.', 4000);
   }
+}
+
+/** After time away, offer what the company earned (it stays paused while closed). */
+function offerAway(): void {
+  const at = Number(storage.get(AWAY_KEY));
+  if (!at || !started || world.over) return;
+  const hours = (Date.now() - at) / 3.6e6;
+  if (hours * 60 < CONFIG.away.minMinutes) return;
+  const amount = Math.round(world.econ.awayIncome(hours));
+  if (amount <= 0) return;
+  pendingAway = amount;
+  // Restamp now, so leaving and coming back again never pays the same hours twice.
+  storage.set(AWAY_KEY, String(Date.now()));
+  hud.showAway(Math.min(hours, CONFIG.away.maxHours), amount);
 }
 
 const editor = new Editor(() => world, cam, {
@@ -100,6 +119,13 @@ const hud = new Hud(document.getElementById('hud')!, {
     storage.set('st-layer', l);
   },
   follow: (id) => (follow = id),
+  collectAway: () => {
+    if (pendingAway <= 0) return;
+    world.econ.creditAway(pendingAway);
+    hud.toast(`+${money(pendingAway)} added to your cash`, 2500, 'good');
+    pendingAway = 0;
+    persist();
+  },
   setGraphics: (high) => {
     graphics = high;
     storage.set('st-gfx', high ? 'high' : 'low');
@@ -126,6 +152,7 @@ const hud = new Hud(document.getElementById('hud')!, {
       return;
     }
     begin(w);
+    offerAway();
     const { year, month } = w.date();
     hud.toast(`Welcome back. ${MONTHS[month]} ${year}, ${money(w.econ.cash)} in the bank.`, 3000);
   },
@@ -256,7 +283,7 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('touchend', () => audio.unlock(), { passive: true });
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) return;
+  if (!document.hidden) return offerAway();
   if (started && !world.over) speed = 0;
   persist();
 });

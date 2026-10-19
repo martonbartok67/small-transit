@@ -1,9 +1,9 @@
 import { THEME } from '../render/theme';
 import { CARGO_LABEL, CONFIG, INDUSTRY, modelsFor, TOWN_CARGO } from '../sim/config';
 import { Economy } from '../sim/economy';
-import type { Carries, Freight, Industry, Ledger, Line, Mode, Vehicle } from '../sim/types';
+import type { Carries, CompanyUpgrade, Freight, Industry, Ledger, Line, Mode, Stop, StopUpgrade, Vehicle } from '../sim/types';
 import { loadOf } from '../sim/vehicles';
-import { money, type World } from '../sim/world';
+import { complaint, money, type World } from '../sim/world';
 import {
   actions,
   bar,
@@ -17,6 +17,9 @@ import {
   list,
   lv,
   meter,
+  pips,
+  scoreColor,
+  stars,
   pct,
   plural,
   round,
@@ -36,9 +39,9 @@ import { ICON } from './icons';
 
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-export type LineFilter = 'all' | 'rail' | 'road' | 'losing';
+export type LineFilter = 'all' | 'rail' | 'road' | 'losing' | 'unhappy';
 export type WorldTab = 'towns' | 'industries';
-export type CompanyTab = 'overview' | 'ledger' | 'bank' | 'news';
+export type CompanyTab = 'overview' | 'ledger' | 'bank' | 'upgrades' | 'news';
 
 /** What the panel shows. The four pages open from the bottom bar; the rest inspect something on the map. */
 export type Sheet =
@@ -107,13 +110,16 @@ function ends(w: World, l: Line): string {
   return `${name(l.stops[0])} ⇄ ${name(l.stops[l.stops.length - 1])}`;
 }
 
+/** A line carries passengers, so riders rate it. */
+const rated = (w: World, l: Line) => w.vehiclesOn(l.id, 'pax').length > 0;
+
 function lineRow(w: World, l: Line): string {
   const n = w.vehiclesOn(l.id).length;
   return row({
     act: `open-line:${l.id}`,
     lead: bullet(l),
     title: ends(w, l),
-    meta: n ? `${plural(n, 'vehicle')} · ${round(l.carriedLast)} carried` : '<span class="warn-text">Needs a vehicle</span>',
+    meta: n ? `${rated(w, l) ? `${stars(l.rating.score)} ` : ''}${plural(n, 'vehicle')} · ${round(l.carriedLast)} carried` : '<span class="warn-text">Needs a vehicle</span>',
     trail: `${spark(l.history, THEME.lines[l.color])}${val(money(l.profitLast), l.profitLast < 0)}`,
   });
 }
@@ -121,11 +127,12 @@ function lineRow(w: World, l: Line): string {
 function linesPage(w: World, filter: LineFilter): View {
   const total = w.lines.reduce((n, l) => n + l.profitLast, 0);
   const carried = w.lines.reduce((n, l) => n + l.carriedLast, 0);
-  const shown = w.lines.filter((l) => (filter === 'all' ? true : filter === 'losing' ? l.profitLast < 0 : l.mode === filter));
+  const unhappy = (l: Line) => rated(w, l) && l.rating.score < CONFIG.satisfaction.low;
+  const shown = w.lines.filter((l) => (filter === 'all' ? true : filter === 'losing' ? l.profitLast < 0 : filter === 'unhappy' ? unhappy(l) : l.mode === filter));
   const losing = w.lines.filter((l) => l.profitLast < 0).length;
   const f = (k: LineFilter, label: string) => ({ act: `filter:${k}`, label, on: filter === k });
   return {
-    key: `lines|${filter}|${w.month}|${w.lines.map((l) => `${l.id}:${w.vehiclesOn(l.id).length}`).join()}`,
+    key: `lines|${filter}|${w.month}|${w.lines.map((l) => Math.round(l.rating.score * 10)).join()}|${w.lines.map((l) => `${l.id}:${w.vehiclesOn(l.id).length}`).join()}`,
     head: pageTitle('Lines', `${plural(w.lines.length, 'line')} · ${plural(w.vehicles.length, 'vehicle')}`),
     body: w.lines.length
       ? `${board([
@@ -133,7 +140,7 @@ function linesPage(w: World, filter: LineFilter): View {
           { label: 'Carried', value: val(round(carried)), note: 'last month' },
           { label: 'Losing', value: val(String(losing), losing > 0), note: plural(losing, 'line') },
         ])}
-        ${segs([f('all', 'All'), f('rail', 'Rail'), f('road', 'Road'), f('losing', 'Losing')])}
+        ${segs([f('all', 'All'), f('rail', 'Rail'), f('road', 'Road'), f('losing', 'Losing'), f('unhappy', 'Unhappy')])}
         ${shown.length ? list(shown.map((l) => lineRow(w, l))) : hint('No lines match.')}`
       : empty(
           ICON.navLines,
@@ -239,11 +246,13 @@ function companyPage(w: World, tab: CompanyTab, graphics: boolean): View {
   let key = `company|${tab}|${w.month}|${graphics}`;
   if (tab === 'overview') {
     const last = Economy.net(e.last);
+    const net = networkRating(w);
     body = `${board([
       { label: 'Cash', value: lv('cash', live.cash) },
       { label: 'Value', value: lv('value', live.value) },
       { label: 'This month', value: lv('monthNet', live.monthNet), note: `Last month ${delta(last)}` },
     ])}
+      ${net !== null ? `<div class="rating-strip"><span class="grow"><span class="t">Network rating</span><small>Riders' view of all your passenger lines</small></span>${stars(net, 'md')}<b>${(net * 5).toFixed(1)}</b></div>` : ''}
       ${section(`Cash, last ${e.history.length} months`)}
       ${chart(
         e.history.map((h) => h.cash),
@@ -256,7 +265,7 @@ function companyPage(w: World, tab: CompanyTab, graphics: boolean): View {
       )}
       ${hint(`Income less running costs, before building and buying vehicles. ${round(w.delivered)} passengers and ${round(w.deliveredCargo)} cargo delivered so far.`)}
       ${section('Game')}
-      ${list([row({ act: 'help', lead: tile(ICON.help, '#0a5bd3'), title: 'How to play', meta: 'Six short pages' })])}
+      ${list([row({ act: 'help', lead: tile(ICON.help, '#0a5bd3'), title: 'How to play', meta: 'Seven short pages' })])}
       ${switchRow('gfx', graphics, 'High graphics', 'Smoke, clouds, glints and glow. Turn off on slower phones.')}`;
   } else if (tab === 'ledger') {
     const rows: [string, keyof Ledger][] = [
@@ -267,6 +276,7 @@ function companyPage(w: World, tab: CompanyTab, graphics: boolean): View {
       ['Loan interest', 'interest'],
       ['Construction', 'construction'],
       ['Vehicles bought', 'vehicles'],
+      ['While away', 'away'],
     ];
     const cell = (n: number) => `<td class="${n < 0 ? 'neg' : ''}">${n === 0 ? '·' : money(n)}</td>`;
     body = `<table class="ledger">
@@ -292,6 +302,10 @@ function companyPage(w: World, tab: CompanyTab, graphics: boolean): View {
       ${priceRow(w, 'rail')}
       ${priceRow(w, 'road')}
       ${hint('Dearer tickets earn more per rider, but fewer people travel and towns grow slower. Freight rates are fixed.')}`;
+  } else if (tab === 'upgrades') {
+    key += `|${Object.values(e.upgrades).join()}|${Math.round(e.cash / 5e4)}`;
+    body = `${hint('Company upgrades apply to every line. Each has three levels.')}
+      ${list(COMPANY_UPGRADES.map((u) => upgradeRow(w, e.upgrades[u.track], CONFIG.upgrades.companyPrice, u.icon, u.title, u.effect(e.upgrades[u.track]), `up-co:${u.track}`)))}`;
   } else {
     const items = [...w.news].reverse();
     key += `|${w.news.length}`;
@@ -304,9 +318,47 @@ function companyPage(w: World, tab: CompanyTab, graphics: boolean): View {
   return {
     key,
     head: pageTitle('Company', `${MONTHS[month]} ${year} · value ${money(w.companyValue())}`),
-    body: `${segs([t('overview', 'Overview'), t('ledger', 'Ledger'), t('bank', 'Bank'), t('news', 'News')])}${body}`,
+    body: `${segs([t('overview', 'Overview'), t('ledger', 'Ledger'), t('bank', 'Bank'), t('upgrades', 'Upgrades'), t('news', 'News')])}${body}`,
     live,
   };
+}
+
+/** Rider-weighted average rating of the passenger lines, or null with none running. */
+function networkRating(w: World): number | null {
+  let sum = 0;
+  let weight = 0;
+  for (const l of w.lines) {
+    if (!rated(w, l)) continue;
+    const k = Math.max(1, l.carriedLast);
+    sum += l.rating.score * k;
+    weight += k;
+  }
+  return weight ? sum / weight : null;
+}
+
+const pctUp = (x: number, level: number) => `+${Math.round(x * level * 100)}%`;
+
+const COMPANY_UPGRADES: { track: CompanyUpgrade; title: string; icon: string; effect: (lvl: number) => string }[] = [
+  { track: 'workshop', title: 'Workshop', icon: ICON.renew, effect: (n) => `Running costs ${n ? `−${Math.round(CONFIG.upgrades.workshop * n * 100)}%` : 'unchanged'}; −5% a level` },
+  { track: 'marketing', title: 'Marketing', icon: ICON.news, effect: (n) => `Passengers ${n ? pctUp(CONFIG.upgrades.marketing, n) : 'unchanged'}; +4% a level` },
+  { track: 'brokerage', title: 'Freight brokerage', icon: ICON.freight, effect: (n) => `Freight pay ${n ? pctUp(CONFIG.upgrades.brokerage, n) : 'unchanged'}; +6% a level` },
+  { track: 'service', title: 'Customer service', icon: ICON.help, effect: (n) => `Every rating ${n ? `+${(CONFIG.upgrades.service * n * 5).toFixed(2)} stars` : 'unchanged'}; +0.25 stars a level` },
+];
+
+const STOP_UPGRADES: { track: StopUpgrade; title: (s: Stop) => string; icon: string; effect: (s: Stop, w: World) => string }[] = [
+  { track: 'capacity', title: (s) => (s.mode === 'rail' ? 'Longer platforms' : 'Bigger bay'), icon: ICON.navFleet, effect: (s, w) => `Holds ${round(w.capacity(s))}; +50% a level` },
+  { track: 'shelter', title: () => 'Shelter', icon: ICON.town, effect: (s) => `Riders wait ${s.up.shelter ? pctUp(CONFIG.upgrades.shelterPatience, s.up.shelter) : 'no'} longer, lines here feel more comfortable` },
+  { track: 'reach', title: () => 'Wider reach', icon: ICON.navWorld, effect: (s, w) => `Reaches ${round(w.catchment(s))} units; +15% a level` },
+];
+
+function upgradeRow(w: World, level: number, prices: number[], icon: string, name: string, effect: string, act: string): string {
+  const max = level >= CONFIG.maxUpgrade;
+  const price = prices[level];
+  return `<div class="row upgrade">
+    <span class="lead">${tile(icon, max ? 'var(--good)' : 'var(--ink)')}</span>
+    <span class="grow"><span class="t">${name} ${pips(level, CONFIG.maxUpgrade)}</span><small>${effect}</small></span>
+    ${max ? '<span class="maxed">Max</span>' : `<button class="btn primary small" data-act="${act}" ${w.econ.cash >= price ? '' : 'disabled'}>${money(price)}</button>`}
+  </div>`;
 }
 
 function priceRow(w: World, mode: Mode): string {
@@ -357,7 +409,7 @@ function lineView(w: World, id: number, confirmDelete: boolean): View | null {
     </div>`;
   };
   return {
-    key: `line|${id}|${vs.map((v) => v.type.key).join()}|${l.stops.join()}|${l.fullLoad}|${confirmDelete}|${w.month}|${renew.length}|${w.networkVersion}`,
+    key: `line|${id}|${vs.map((v) => v.type.key).join()}|${l.stops.join()}|${l.fullLoad}|${confirmDelete}|${w.month}|${renew.length}|${w.networkVersion}|${l.interval.pax}|${l.interval.cargo}`,
     head: title(l.name, `${l.mode === 'rail' ? 'Rail' : 'Road'} · ${plural(l.stops.length, 'stop')} · ${(len / 1000).toFixed(1)} km${l.loop ? ' · loop' : ''}`, bullet(l, 'lg')),
     body: `${board([
       { label: 'Profit', value: lv('profit', live.profit), note: 'last month' },
@@ -365,6 +417,8 @@ function lineView(w: World, id: number, confirmDelete: boolean): View | null {
       { label: 'Carried', value: lv('carried', live.carried) },
       { label: 'On board', value: lv('board', live.board) },
     ])}
+      ${service(w, l)}
+      ${rating(w, l)}
       ${section('Vehicles')}
       ${list([fleet('pax'), fleet('cargo')])}
       ${vs.length ? '' : hint('Tap + to buy a vehicle and start service.')}
@@ -380,6 +434,41 @@ function lineView(w: World, id: number, confirmDelete: boolean): View | null {
   };
 }
 
+const days = (n: number) => `${n % 1 ? n.toFixed(1) : n} day${n === 1 ? '' : 's'}`;
+
+/** Interval controls for each kind of service the line runs, with what the fleet can manage. */
+function service(w: World, l: Line): string {
+  const kinds = (['pax', 'cargo'] as Carries[]).filter((c) => w.vehiclesOn(l.id, c).length || l.interval[c] || c === 'pax');
+  const rows = kinds.map((c) => {
+    const iv = l.interval[c];
+    const have = w.vehiclesOn(l.id, c).length;
+    const need = w.neededVehicles(l, c);
+    const actual = w.actualInterval(l, c);
+    const label = c === 'pax' ? 'Passengers' : 'Freight';
+    const lacking = need !== null && have < need;
+    const meta =
+      need !== null
+        ? `Needs ${plural(need, 'vehicle')} · has ${have}${lacking ? ' · <span class="warn-text">short</span>' : ''}`
+        : `As often as ${plural(have, 'vehicle')} allow${have === 1 ? 's' : ''}`;
+    return `<div class="row interval">
+      <span class="grow"><span class="t">${label}: ${iv ? `every ${days(iv)}` : 'no timetable'}</span><small>${meta}${actual ? ` · ran every ${days(Math.round(actual * 10) / 10)} last month` : ''}</small></span>
+      ${stepper({ down: `interval:${l.id}.${c}-`, up: `interval:${l.id}.${c}+`, value: iv ? `${iv}d` : 'Off', downOff: iv === 0, upOff: iv >= CONFIG.maxInterval, label: 'days between departures' })}
+    </div>${lacking ? actions(button('primary', `buy-pick:${l.id}.${c}`, `Buy ${need! - have} more to keep it`, { icon: ICON.plus, wide: true })) : ''}`;
+  });
+  return `${section('Timetable')}${list(rows)}${hint(`A round trip takes about ${days(Math.round(w.roundTripDays(l, kinds[0])))}. Set how often vehicles leave ${short(w.stopById(l.stops[0])?.name ?? 'the first stop')}; they wait there to keep the interval.`)}`;
+}
+
+/** Riders' stars for a passenger line, and what drives them. */
+function rating(w: World, l: Line): string {
+  if (!rated(w, l)) return '';
+  const r = l.rating;
+  const part = (label: string, x: number) => `<div class="meter"><span class="grow">${label}</span>${bar(x, scoreColor(x))}<b>${(x * 5).toFixed(1)}</b></div>`;
+  return `${section('Riders')}
+    <div class="rating-strip"><span class="grow"><span class="t">${(r.score * 5).toFixed(1)} of 5</span><small>${r.score < 0.7 ? `Main complaint: ${complaint(r)}` : 'Riders are happy'}</small></span>${stars(r.score, 'md')}</div>
+    ${part('Waiting', r.wait)}${part('Room on board', r.crowd)}${part('Comfort', r.comfort)}${r.reliability !== null ? part('Keeps timetable', r.reliability) : ''}${part('Fares', r.fare)}
+    ${hint('Better ratings bring more riders. Ratings update at each month end.')}`;
+}
+
 function stopView(w: World, id: number): View | null {
   const st = w.stopById(id);
   if (!st) return null;
@@ -387,19 +476,20 @@ function stopView(w: World, id: number): View | null {
   const inds = w.industriesAt(st);
   const by = w.waitingBy(st);
   const kinds = Object.keys(by) as Freight[];
-  const cap = CONFIG.stop[st.mode].capacity;
+  const cap = w.capacity(st);
   const total = w.waitingTotal(st);
   const town = st.town >= 0 ? w.towns[st.town].name : 'Countryside';
   const live: Record<string, Live> = { wait: { text: `${round(total)} / ${cap}`, bad: total >= cap * 0.9 }, res: { text: round(st.residents) }, fill: { text: pct(total / cap) } };
   for (const f of kinds) live[`w-${f}`] = { text: round(by[f]!) };
   return {
-    key: `stop|${id}|${kinds.join()}|${lines.map((l) => l.id).join()}|${inds.length}|${st.town}`,
+    key: `stop|${id}|${kinds.join()}|${lines.map((l) => l.id).join()}|${inds.length}|${st.town}|${Object.values(st.up).join()}|${Math.round(w.econ.cash / 5e4)}|${w.month}`,
     // A station nameplate: the stop's name on a black band, with the lines that call here.
     head: `<div class="grow"><div class="nameplate ${st.mode}"><span class="np-icon">${MODE_ICON[st.mode]}</span><span class="np-name">${st.name}</span></div>
       <p>${st.mode === 'rail' ? 'Station' : 'Road stop'} · ${town}${lines.length ? ` · <span class="np-lines">${lines.map((l) => bullet(l, 'sm')).join('')}</span>` : ''}</p></div>`,
     body: `${board([
       { label: 'Waiting', value: lv('wait', live.wait) },
       { label: 'In reach', value: lv('res', live.res), note: 'residents' },
+      ...(lines.some((l) => rated(w, l)) ? [{ label: 'Rating', value: val((w.stopRating(st) * 5).toFixed(1)), note: stars(w.stopRating(st)) }] : []),
     ])}
       <div class="meter"><span class="grow">Platform full</span>${bar(total / cap, total >= cap * 0.9 ? 'var(--bad)' : 'var(--signal)')}${lv('fill', live.fill)}</div>
       ${section('Waiting for')}
@@ -407,6 +497,8 @@ function stopView(w: World, id: number): View | null {
       ${inds.length ? `${section('Industries in reach')}${list(inds.map((i) => row({ act: `open-industry:${i.id}`, lead: tile(ICON.factory, THEME.cargo[i.produces]), title: i.name, meta: INDUSTRY[i.kind].label })))}` : ''}
       ${section('Lines calling here')}
       ${lines.length ? list(lines.map((l) => lineRow(w, l))) : hint(`No line stops here yet. Drag from this ${st.mode === 'rail' ? 'station to another station' : 'stop to another road stop'} to build one.`)}
+      ${section('Upgrades')}
+      ${list(STOP_UPGRADES.map((u) => upgradeRow(w, st.up[u.track], CONFIG.upgrades.stopPrice[st.mode], u.icon, u.title(st), u.effect(st, w), `up-stop:${st.id}.${u.track}`)))}
       ${lines.length === 0 ? actions(button('danger', `demolish:${st.id}`, 'Demolish')) : ''}`,
     live,
   };

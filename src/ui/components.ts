@@ -140,3 +140,20 @@ export function spark(values: number[], color: string): string {
   const m = Math.max(1, ...vs.map(Math.abs));
   return `<span class="spark">${vs.map((x) => `<i style="height:${Math.max(8, (Math.abs(x) / m) * 100)}%;background:${x < 0 ? 'var(--bad)' : color}"></i>`).join('')}</span>`;
 }
+
+/** A rating as five stars, filled to the nearest half. */
+export function stars(score: number, size: 'sm' | 'md' = 'sm'): string {
+  const halves = Math.round(Math.max(0, Math.min(1, score)) * 10);
+  let out = '';
+  for (let i = 0; i < 5; i++) {
+    const fill = halves >= (i + 1) * 2 ? 'full' : halves === i * 2 + 1 ? 'half' : 'none';
+    out += `<i class="${fill}"></i>`;
+  }
+  return `<span class="stars ${size}" role="img" aria-label="${(halves / 2).toFixed(1)} of 5 stars">${out}</span>`;
+}
+
+/** Colour for a 0 to 1 score: red when poor, amber in between, green when good. */
+export const scoreColor = (x: number) => (x < 0.4 ? 'var(--bad)' : x < 0.7 ? 'var(--warn)' : 'var(--good)');
+
+/** Upgrade level as filled and empty pips. */
+export const pips = (level: number, max: number) => `<span class="pips">${Array.from({ length: max }, (_, i) => `<i class="${i < level ? 'on' : ''}"></i>`).join('')}</span>`;

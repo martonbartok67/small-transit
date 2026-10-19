@@ -1117,6 +1117,130 @@ button.row:active {
   bottom: 8px;
 }
 
+/* ---------- ratings, timetable, upgrades ---------- */
+.stars {
+  display: inline-flex;
+  gap: 1px;
+  vertical-align: -2px;
+}
+.stars i {
+  width: 11px;
+  height: 11px;
+  background: var(--surface-3);
+  clip-path: polygon(50% 0, 62% 35%, 100% 38%, 70% 61%, 80% 100%, 50% 78%, 20% 100%, 30% 61%, 0 38%, 38% 35%);
+}
+.stars i.full {
+  background: var(--warn);
+}
+.stars i.half {
+  background: linear-gradient(90deg, var(--warn) 50%, var(--surface-3) 50%);
+}
+.stars.md i {
+  width: 18px;
+  height: 18px;
+}
+.rating-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.rating-strip .grow {
+  flex: 1;
+  min-width: 0;
+}
+.rating-strip .t {
+  display: block;
+  font-weight: 800;
+  font-size: 15px;
+}
+.rating-strip small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.rating-strip > b {
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.row.interval .t {
+  font-size: 14.5px;
+}
+.row.interval small {
+  white-space: normal;
+}
+.pips {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.pips i {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+.pips i.on {
+  background: var(--signal);
+}
+.row.upgrade small {
+  white-space: normal;
+}
+.btn.small {
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 13px;
+  flex: none;
+}
+.maxed {
+  flex: none;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--good);
+}
+.sign-band.good {
+  background: var(--good);
+}
+.sign-band.good h1 {
+  font-size: 30px;
+}
+.away-amount {
+  padding: 18px 22px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.away-amount small {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.away-amount b {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--good);
+  font-variant-numeric: tabular-nums;
+}
+.away-amount span {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+.segs .seg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---------- strip map, nameplate, chain ---------- */
 .strip {
   --c: var(--ink);
@@ -1838,4 +1962,8 @@ button.row:active {
     animation-delay: 0ms !important;
     transition-duration: 1ms !important;
   }
+}
+.segs[style*='--n:5'] .seg {
+  font-size: 12px;
+  padding: 8px 2px;
 }

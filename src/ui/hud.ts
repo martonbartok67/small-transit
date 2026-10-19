@@ -1,7 +1,7 @@
 import type { Layer } from '../render/renderer';
 import { CONFIG } from '../sim/config';
 import { Economy } from '../sim/economy';
-import type { Carries, Mode } from '../sim/types';
+import type { Carries, CompanyUpgrade, Mode, StopUpgrade } from '../sim/types';
 import { money, type World } from '../sim/world';
 import { marker, plural, round, type Live } from './components';
 import type { Tool } from './editor';
@@ -64,6 +64,12 @@ const HELP: { title: string; text: string; icon: string; color: string }[] = [
     text: 'Towns with good passenger service and steady food, goods and fuel grow, up to about four times their size. In Company you can set ticket prices: dearer tickets earn more per rider, but fewer people travel. The layers button at the top shows coverage and cargo flows.',
   },
   {
+    title: 'Keep riders happy',
+    icon: ICON.navLines,
+    color: '#ffc20e',
+    text: 'Riders give every passenger line up to five stars for short waits, room on board, comfortable vehicles, a kept timetable and fair fares. More stars bring more riders. Set a timetable on a line to run every few days, and upgrade busy stops and the company when money allows.',
+  },
+  {
     title: 'Stay solvent',
     icon: ICON.coin,
     color: '#00a0b0',
@@ -82,6 +88,7 @@ export interface HudCallbacks {
   focus(target: { stop?: number; line?: number; town?: number; industry?: number }): void;
   follow(vehicleId: number): void;
   setGraphics(high: boolean): void;
+  collectAway(): void;
 }
 
 export interface HudState {
@@ -137,6 +144,8 @@ export class Hud {
   private overlayKind = '';
   private drag: { y: number; start: number; moved: boolean; t: number } | null = null;
   private draggedAt = 0;
+  /** Income waiting to be collected after time away. */
+  private away: { hours: number; amount: number } | null = null;
 
   constructor(
     root: HTMLElement,
@@ -271,6 +280,11 @@ export class Hud {
     el.classList.add(good ? 'flash-good' : 'flash-bad');
   }
 
+  /** Offer what the company earned while the app was closed. */
+  showAway(hours: number, amount: number): void {
+    this.away = { hours, amount };
+  }
+
   get helpOpen(): boolean {
     return this.help !== null;
   }
@@ -386,6 +400,28 @@ export class Hud {
         return this.openSheet({ kind: 'company', tab: (arg || 'overview') as CompanyTab });
       case 'world':
         return this.replaceTop({ kind: 'world', tab: arg as WorldTab });
+      case 'interval': {
+        const [id, rest] = arg.split('.');
+        const carries = rest.slice(0, -1) as Carries;
+        const l = w.lineById(Number(id));
+        if (!l) return;
+        const now = l.interval[carries];
+        // Off steps up to every day; one day steps down to off.
+        w.setInterval(l.id, carries, rest.endsWith('+') ? now + 1 : now - 1);
+        return;
+      }
+      case 'up-stop': {
+        const [id, track] = arg.split('.');
+        const why = w.buyStopUpgrade(Number(id), track as StopUpgrade);
+        return this.toast(why ?? 'Upgraded', 2200, why ? 'bad' : 'good');
+      }
+      case 'up-co': {
+        const why = w.buyCompanyUpgrade(arg as CompanyUpgrade);
+        return this.toast(why ?? 'Upgraded for the whole company', 2200, why ? 'bad' : 'good');
+      }
+      case 'collect':
+        this.away = null;
+        return this.cb.collectAway();
       case 'filter':
         return this.replaceTop({ kind: 'lines', filter: arg as LineFilter });
       case 'open-line':
@@ -646,6 +682,7 @@ export class Hud {
   private renderOverlay(w: World, s: HudState): void {
     let key = 'none';
     if (this.help !== null) key = `help:${this.help}`;
+    else if (this.away && s.started && !w.over) key = `away:${Math.round(this.away.amount)}`;
     else if (!s.started) key = `start:${s.saved}`;
     else if (w.over) key = `over:${Math.round(w.delivered)}`;
     const kind = key.split(':')[0];
@@ -654,6 +691,15 @@ export class Hud {
     this.set(this.overlay, 'overlay', key, () => {
       this.overlayKind = kind;
       if (this.help !== null) return this.helpCard(enter);
+      if (key.startsWith('away')) {
+        const a = this.away!;
+        const h = a.hours >= 1 ? `${Math.floor(a.hours)} h ${Math.round((a.hours % 1) * 60)} min` : `${Math.round(a.hours * 60)} min`;
+        return `<div class="overlay${enter}"><div class="sign">
+          <div class="sign-band good"><div class="stripes" aria-hidden="true"><i></i><i></i><i></i><i></i></div><h1>While you were away</h1><span class="sign-sub">${h} · lines kept running</span></div>
+          <div class="away-amount"><small>Earned</small><b>+${money(a.amount)}</b><span>Half of last month's operating profit for each hour, up to ${CONFIG.away.maxHours} hours.</span></div>
+          <div class="departures"><button class="departure" data-act="collect">${marker('#0a8f4e', '$')}<span class="grow"><span class="t">Collect</span><small>Add it to your cash and carry on</small></span><span class="chev">${ICON.chevron}</span></button></div>
+        </div></div>`;
+      }
       if (!s.started) {
         const dep = (act: string, color: string, label: string, title: string, meta: string) =>
           `<button class="departure" data-act="${act}">${marker(color, label)}<span class="grow"><span class="t">${title}</span><small>${meta}</small></span><span class="chev">${ICON.chevron}</span></button>`;
@@ -668,7 +714,7 @@ export class Hud {
             <div class="dep-head"><span>Departures</span><span>Platform</span></div>
             ${s.saved ? dep('resume', '#e2231a', '1', 'Continue', 'Your company, where you left it') : ''}
             ${dep('start', '#0072ce', s.saved ? '2' : '1', 'New company', s.saved ? 'Replaces the saved company' : 'Start in 1950 with $1.5M')}
-            ${dep('help', '#00a651', s.saved ? '3' : '2', 'How to play', 'Six short pages')}
+            ${dep('help', '#00a651', s.saved ? '3' : '2', 'How to play', `${HELP.length} short pages`)}
           </div>
         </div></div>`;
       }
