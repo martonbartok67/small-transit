@@ -63,6 +63,57 @@ export const CONFIG = {
   aging: { costPerYear: 0.03, valueLossPerYear: 0.04, minValue: 0.15 },
   /** With full load on, a vehicle waits at the first stop until full, but never longer than this. */
   fullLoadMaxMonths: 1,
+  /** Longest interval a line can be set to run at, in days (one second of game time is one day). */
+  maxInterval: 30,
+
+  /**
+   * Passenger satisfaction: each passenger line earns a rating from 0 to 1 (0 to 5 stars) at
+   * every month end, from waiting, crowding, comfort, reliability and fares. Riders at a stop
+   * scale by 1 + demandSpan × (rating − demandPivot); the pivot is where the test bots' typical
+   * service lands, so ordinary service keeps the riders it had before ratings existed.
+   */
+  satisfaction: {
+    /** Days between departures: at or under `waitGood` scores 1, at or over `waitBad` scores 0. */
+    waitGood: 5,
+    waitBad: 40,
+    /** Average load leaving stops: at or under `crowdGood` scores 1, full scores 0. */
+    crowdGood: 0.7,
+    crowdBad: 1,
+    /** Taken off crowding when stops on the line turn people away. */
+    turnedAway: 0.3,
+    /** Comfort lost per year of vehicle age, and per newer model on sale. */
+    ageCost: 0.06,
+    outdatedCost: 0.15,
+    weights: { wait: 0.35, crowd: 0.25, comfort: 0.2, reliability: 0.1, fare: 0.1 },
+    /** Share of the way a rating moves toward the new month's score. */
+    smoothing: 0.4,
+    neutral: 0.65,
+    demandPivot: 0.65,
+    demandSpan: 0.6,
+    /** Ratings below `low` or above `high` make the news. */
+    low: 0.4,
+    high: 0.8,
+  },
+
+  /** Upgrades: three levels each, for single stops and for the whole company. */
+  upgrades: {
+    stopPrice: { rail: [60_000, 150_000, 350_000], road: [10_000, 25_000, 60_000] } satisfies Record<Mode, number[]>,
+    /** Per level: waiting room, slower giving up, comfort for lines calling there, catchment radius. */
+    capacity: 0.5,
+    shelterPatience: 0.25,
+    shelterComfort: 0.1,
+    reach: 0.15,
+    companyPrice: [150_000, 400_000, 900_000],
+    /** Per level: running costs saved, passenger demand added, freight pay added, rating added. */
+    workshop: 0.05,
+    marketing: 0.04,
+    brokerage: 0.06,
+    service: 0.05,
+  },
+  maxUpgrade: 3,
+
+  /** Income while the app is closed: this share of last month's operating profit per hour away, up to maxHours. */
+  away: { share: 0.5, maxHours: 8, minMinutes: 10 },
 };
 
 export const INDUSTRY: Record<IndustryKind, { label: string; produces: Cargo; accepts: Cargo | null }> = {

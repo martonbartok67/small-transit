@@ -673,7 +673,7 @@ export class Renderer {
     for (const s of world.stops) {
       if (s.mode !== mode) continue;
       ctx.beginPath();
-      ctx.arc(s.pos.x, s.pos.y, CONFIG.stop[mode].catchment, 0, Math.PI * 2);
+      ctx.arc(s.pos.x, s.pos.y, world.catchment(s), 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
@@ -708,7 +708,7 @@ export class Renderer {
     ctx.strokeStyle = 'rgba(255,255,255,0.55)';
     for (const st of world.stops) {
       ctx.beginPath();
-      ctx.arc(st.pos.x, st.pos.y, CONFIG.stop[st.mode].catchment, 0, Math.PI * 2);
+      ctx.arc(st.pos.x, st.pos.y, world.catchment(st), 0, Math.PI * 2);
       ctx.stroke();
     }
   }
@@ -905,7 +905,7 @@ export class Renderer {
     const age = world.time - s.bornAt;
     // Springs up when built: overshoots a little, then settles.
     const pop = age < 0.5 ? easeOutBack(Math.max(0, age) / 0.5) : 1;
-    const full = world.waitingTotal(s) >= CONFIG.stop[s.mode].capacity * 0.9;
+    const full = world.waitingTotal(s) >= world.capacity(s) * 0.9;
     const docked = world.vehicles.some((t) => t.state === 'dwelling' && t.dockedAt === s.id);
     if (docked && this.motion) {
       // Boarding: a soft ring ripples out from the stop while a vehicle is in.

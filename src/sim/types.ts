@@ -90,6 +90,26 @@ export interface Stop {
   /** Industries close enough to ship or receive through this stop. */
   industries: number[];
   bornAt: number;
+  /** Upgrade levels, 0 to CONFIG.maxUpgrade. */
+  up: StopUpgrades;
+  /** Passengers turned away this month because the stop was full. */
+  turnedMonth: number;
+}
+
+export type StopUpgrade = 'capacity' | 'shelter' | 'reach';
+export type StopUpgrades = Record<StopUpgrade, number>;
+export type CompanyUpgrade = 'workshop' | 'marketing' | 'brokerage' | 'service';
+
+/** How riders judge a passenger line, each part from 0 (bad) to 1 (good). */
+export interface Rating {
+  wait: number;
+  crowd: number;
+  comfort: number;
+  /** Only when the line runs to a set interval. */
+  reliability: number | null;
+  fare: number;
+  /** Smoothed overall rating; stars are score × 5. */
+  score: number;
 }
 
 export interface Segment {
@@ -118,6 +138,15 @@ export interface Line {
   fullLoad: boolean;
   /** Profit at each month end, oldest first (last 24 months). */
   history: number[];
+  /** Target days between departures from the first stop, per kind of service; 0 runs as often as the fleet allows. */
+  interval: Record<Carries, number>;
+  /** Departures from the first stop this month and last month. */
+  departuresMonth: Record<Carries, number>;
+  departuresLast: Record<Carries, number>;
+  /** Passenger load leaving stops this month: summed fill (0 to 1) and number of departures sampled. */
+  loadSum: number;
+  loadN: number;
+  rating: Rating;
 }
 
 /** The four kinds of vehicle; each has several models over the years. */
@@ -194,6 +223,8 @@ export interface Ledger {
   interest: number;
   construction: number;
   vehicles: number;
+  /** Income credited for time the app was closed. */
+  away: number;
 }
 
 export interface TownDef {

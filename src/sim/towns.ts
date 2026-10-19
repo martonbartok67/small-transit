@@ -131,6 +131,9 @@ export function refreshPopulations(towns: Town[], districts: District[], houses:
  * Assign every house to its nearest covering stop, and every stop its town and
  * the industries in reach. Returns the stops covering each district.
  */
+/** How far a stop reaches, in world units: its mode's catchment, widened by the Reach upgrade. */
+export const catchmentOf = (s: Stop): number => CONFIG.stop[s.mode].catchment * (1 + CONFIG.upgrades.reach * (s.up?.reach ?? 0));
+
 export function assignCatchment(houses: House[], stops: Stop[], towns: Town[], industries: Industry[]): Map<number, number[]> {
   for (const s of stops) {
     s.covers = new Set();
@@ -151,8 +154,9 @@ export function assignCatchment(houses: House[], stops: Stop[], towns: Town[], i
     h.stop = -1;
     let bd = Infinity;
     for (const s of stops) {
-      const d = Math.abs(s.pos.x - h.pos.x) + Math.abs(s.pos.y - h.pos.y) < CONFIG.stop[s.mode].catchment * 1.5 ? dist(s.pos, h.pos) : Infinity;
-      if (d > CONFIG.stop[s.mode].catchment) continue;
+      const r = catchmentOf(s);
+      const d = Math.abs(s.pos.x - h.pos.x) + Math.abs(s.pos.y - h.pos.y) < r * 1.5 ? dist(s.pos, h.pos) : Infinity;
+      if (d > r) continue;
       s.covers.add(h.district);
       if (d < bd) {
         bd = d;

@@ -1,17 +1,17 @@
 import { CONFIG, INDUSTRY, modelsFor, TOWN_CARGO, VEHICLES, vehicleFor } from './config';
-import { Economy } from './economy';
+import { Economy, emptyLedger } from './economy';
 import { dist, offsetPolyline, polylineLength, type Vec2 } from './geom';
 import { Rng } from './rng';
-import { ahead, departDir, Router } from './router';
+import { ahead, departDir, roundTrip, Router } from './router';
 import { Terrain } from './terrain';
-import { assignCatchment, blockAlong, buildTowns, growTown, isDry, lotKey, refreshPopulations, townRadius, type Lots } from './towns';
-import type { Carries, District, Freight, Group, House, Industry, Line, MapDef, Mode, News, Segment, SimEvent, Stop, Town, Vehicle, VehicleType } from './types';
+import { assignCatchment, blockAlong, buildTowns, catchmentOf, growTown, isDry, lotKey, refreshPopulations, townRadius, type Lots } from './towns';
+import type { Carries, CompanyUpgrade, District, Freight, Group, House, Industry, Line, MapDef, Mode, News, Rating, Segment, SimEvent, Stop, StopUpgrade, Town, Vehicle, VehicleType } from './types';
 import { dock, loadOf, resyncVehicles, segPath, updateVehicle } from './vehicles';
 
 export const LINE_SPACING: Record<Mode, number> = { rail: 9, road: 7 };
 export const LINE_COLORS = 8;
 /** Bump when the save layout changes; older saves are then ignored. */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /** Seconds between passenger spawning, cargo production and patience updates. */
 const TICK = 0.5;
@@ -210,6 +210,7 @@ export class World {
   }
 
   private closeMonth(): void {
+    this.rateLines();
     for (const l of this.lines) {
       l.profitLast = l.revenueMonth - l.costMonth;
       l.carriedLast = l.carriedMonth;
@@ -283,15 +284,26 @@ export class World {
 
   // ---------- passengers and cargo ----------
 
+  /** How far a stop reaches, with its Reach upgrade. */
+  catchment(s: Stop): number {
+    return catchmentOf(s);
+  }
+
+  /** How many people and how much cargo a stop holds, with its Capacity upgrade. */
+  capacity(s: Stop): number {
+    return CONFIG.stop[s.mode].capacity * (1 + CONFIG.upgrades.capacity * s.up.capacity);
+  }
+
   /** Add travellers to a stop's queue; whatever does not fit is lost. Returns what fit. */
   private queue(s: Stop, what: Freight, dest: number, n: number): number {
-    const free = Math.max(0, CONFIG.stop[s.mode].capacity - this.waitingTotal(s));
+    const free = Math.max(0, this.capacity(s) - this.waitingTotal(s));
     const fit = Math.min(n, free);
     if (fit > 0) {
       const k = keyOf(what, dest);
       s.waiting[k] = (s.waiting[k] ?? 0) + fit;
     }
     this.lost += n - fit;
+    if (what === 'pax') s.turnedMonth += n - fit;
     return fit;
   }
 
@@ -334,7 +346,8 @@ export class World {
       if (s.residents === 0) continue;
       const dem = this.demandAt(s);
       if (dem.share === 0 || dem.total === 0) continue;
-      const amount = ((s.residents * CONFIG.tripRate * dem.share * this.econ.demand(s.mode)) / CONFIG.monthSeconds) * dt;
+      const happy = 1 + CONFIG.satisfaction.demandSpan * (this.stopRating(s) - CONFIG.satisfaction.demandPivot);
+      const amount = ((s.residents * CONFIG.tripRate * dem.share * this.econ.demand(s.mode) * happy) / CONFIG.monthSeconds) * dt;
       for (const d of dem.dests) this.queue(s, 'pax', d.stop, (amount * d.w) / dem.total);
     }
   }
@@ -378,8 +391,8 @@ export class World {
 
   /** Waiting travellers give up at a steady rate. */
   private decay(dt: number): void {
-    const keep = Math.exp(-dt / (CONFIG.patienceMonths * CONFIG.monthSeconds));
     for (const s of this.stops) {
+      const keep = Math.exp(-dt / (CONFIG.patienceMonths * CONFIG.monthSeconds * (1 + CONFIG.upgrades.shelterPatience * s.up.shelter)));
       for (const k in s.waiting) {
         const n = s.waiting[k];
         this.lost += n * (1 - keep);
@@ -498,7 +511,7 @@ export class World {
       this.econ.earn('fares', amount);
       return amount;
     }
-    const amount = this.freightRate(distance) * n;
+    const amount = this.freightRate(distance) * n * (1 + CONFIG.upgrades.brokerage * this.econ.upgrades.brokerage);
     this.econ.earn('freight', amount);
     return amount;
   }
@@ -552,6 +565,8 @@ export class World {
       town: -1,
       industries: [],
       bornAt: this.time,
+      up: { capacity: 0, shelter: 0, reach: 0 },
+      turnedMonth: 0,
     };
     this.stops.push(s);
     this.stopIndex.set(s.id, s);
@@ -665,6 +680,7 @@ export class World {
         departed: { pax: -1e9, cargo: -1e9 },
         fullLoad: false,
         history: [],
+        ...freshService(),
       };
       this.lines.push(line);
     }
@@ -845,7 +861,7 @@ export class World {
 
   /** Monthly running cost, rising with age. */
   runningCost(v: Vehicle): number {
-    return v.type.runningPerMonth * (1 + CONFIG.aging.costPerYear * this.ageYears(v));
+    return v.type.runningPerMonth * (1 + CONFIG.aging.costPerYear * this.ageYears(v)) * (1 - CONFIG.upgrades.workshop * this.econ.upgrades.workshop);
   }
 
   /** What the vehicle sells for now. */
@@ -878,6 +894,114 @@ export class World {
     }
     if (n) this.router.invalidate();
     return n;
+  }
+
+  /** Set a line's target interval in days for one kind of service; 0 runs as often as the fleet allows. */
+  setInterval(lineId: number, carries: Carries, days: number): void {
+    const line = this.lineById(lineId);
+    if (line) line.interval[carries] = days <= 0 ? 0 : Math.min(CONFIG.maxInterval, Math.max(1, Math.round(days)));
+  }
+
+  /** Days for one vehicle of this service to go round the line. */
+  roundTripDays(line: Line, carries: Carries): number {
+    const type = this.vehiclesOn(line.id, carries)[0]?.type ?? vehicleFor(line.mode, carries, this.date().year);
+    return roundTrip(line, type);
+  }
+
+  /** Vehicles a line needs to keep its interval, or null when it has none. */
+  neededVehicles(line: Line, carries: Carries): number | null {
+    const iv = line.interval[carries];
+    return iv > 0 ? Math.ceil(this.roundTripDays(line, carries) / iv) : null;
+  }
+
+  /** Days between departures from the first stop last month, or null when nothing left. */
+  actualInterval(line: Line, carries: Carries): number | null {
+    const n = line.departuresLast[carries];
+    return n > 0 ? CONFIG.monthSeconds / n : null;
+  }
+
+  /** Average rating of the passenger lines calling at a stop; neutral where none run. */
+  stopRating(s: Stop): number {
+    let sum = 0;
+    let n = 0;
+    for (const l of this.lines) {
+      if (!l.stops.includes(s.id) || !this.vehiclesOn(l.id, 'pax').length) continue;
+      sum += l.rating.score;
+      n++;
+    }
+    return n ? sum / n : CONFIG.satisfaction.demandPivot;
+  }
+
+  /** Riders' view of every passenger line, from last month's service. Called at month end. */
+  private rateLines(): void {
+    const c = CONFIG.satisfaction;
+    const clamp = (x: number) => Math.max(0, Math.min(1, x));
+    const year = this.date().year;
+    for (const l of this.lines) {
+      const fleet = this.vehiclesOn(l.id, 'pax');
+      if (!fleet.length) continue;
+      const days = l.departuresMonth.pax > 0 ? CONFIG.monthSeconds / l.departuresMonth.pax : this.roundTripDays(l, 'pax') / fleet.length;
+      const wait = clamp((c.waitBad - days) / (c.waitBad - c.waitGood));
+      const load = l.loadN > 0 ? l.loadSum / l.loadN : 0;
+      const full = l.stops.filter((id) => (this.stopById(id)?.turnedMonth ?? 0) > 1).length / l.stops.length;
+      const crowd = clamp((c.crowdBad - load) / (c.crowdBad - c.crowdGood) - c.turnedAway * full);
+      const shelter = l.stops.reduce((n, id) => n + (this.stopById(id)?.up.shelter ?? 0), 0) / l.stops.length;
+      const comfort = clamp(
+        fleet.reduce((n, v) => {
+          const newer = modelsFor(v.type.mode, v.type.carries).filter((m) => m.year > v.type.year && m.year <= year).length;
+          return n + 1 - c.ageCost * this.ageYears(v) - c.outdatedCost * newer;
+        }, 0) /
+          fleet.length +
+          CONFIG.upgrades.shelterComfort * shelter,
+      );
+      const needed = this.neededVehicles(l, 'pax');
+      const reliability = needed ? clamp(fleet.length / needed) : null;
+      const fare = clamp(1 - (this.econ.price[l.mode] - 0.5) * 0.8);
+      const w = c.weights;
+      const parts: [number, number][] = [
+        [wait, w.wait],
+        [crowd, w.crowd],
+        [comfort, w.comfort],
+        [fare, w.fare],
+      ];
+      if (reliability !== null) parts.push([reliability, w.reliability]);
+      const raw = parts.reduce((n, [x, k]) => n + x * k, 0) / parts.reduce((n, [, k]) => n + k, 0);
+      const target = clamp(raw + CONFIG.upgrades.service * this.econ.upgrades.service);
+      const before = l.rating.score;
+      const score = before + (target - before) * c.smoothing;
+      l.rating = { wait, crowd, comfort, reliability, fare, score };
+      if (before >= c.low && score < c.low) this.say(`${l.name} riders are unhappy: ${complaint(l.rating)}.`, 'bad');
+      else if (before <= c.high && score > c.high) this.say(`${l.name} riders rate it ${Math.round(score * 10) / 2} stars.`, 'good');
+    }
+    for (const l of this.lines) {
+      l.departuresLast = l.departuresMonth;
+      l.departuresMonth = { pax: 0, cargo: 0 };
+      l.loadSum = l.loadN = 0;
+    }
+    for (const s of this.stops) s.turnedMonth = 0;
+  }
+
+  /** Buy the next level of an upgrade at a stop. Returns why not, or null. */
+  buyStopUpgrade(stopId: number, track: StopUpgrade): string | null {
+    const s = this.stopById(stopId);
+    if (!s) return 'No such stop';
+    const lvl = s.up[track];
+    if (lvl >= CONFIG.maxUpgrade) return 'Fully upgraded';
+    const price = CONFIG.upgrades.stopPrice[s.mode][lvl];
+    if (!this.econ.spend('construction', price)) return `Needs ${money(price)}`;
+    s.up[track] = lvl + 1;
+    if (track === 'reach') this.refreshCatchment();
+    return null;
+  }
+
+  /** Buy the next level of a company upgrade. Returns why not, or null. */
+  buyCompanyUpgrade(track: CompanyUpgrade): string | null {
+    const lvl = this.econ.upgrades[track];
+    if (lvl >= CONFIG.maxUpgrade) return 'Fully upgraded';
+    const price = CONFIG.upgrades.companyPrice[lvl];
+    if (!this.econ.spend('construction', price)) return `Needs ${money(price)}`;
+    this.econ.upgrades[track] = lvl + 1;
+    return null;
   }
 
   setFullLoad(lineId: number, on: boolean): void {
@@ -921,12 +1045,13 @@ export class World {
         history: e.history,
         negativeMonths: e.negativeMonths,
         price: e.price,
+        upgrades: e.upgrades,
       },
       towns: this.towns,
       districts: this.districts,
       industries: this.industries,
       houses: this.houses.map((h) => [h.pos.x, h.pos.y, h.residents, h.town, h.district, h.roof, h.shop ? 1 : 0]),
-      stops: this.stops.map((s) => ({ id: s.id, mode: s.mode, pos: s.pos, name: s.name, waiting: s.waiting, bornAt: s.bornAt })),
+      stops: this.stops.map((s) => ({ id: s.id, mode: s.mode, pos: s.pos, name: s.name, waiting: s.waiting, bornAt: s.bornAt, up: s.up, turnedMonth: s.turnedMonth })),
       lines: this.lines,
       vehicles: this.vehicles.map((v) => ({ ...v, type: v.type.key })),
       ways: [...this.ways.values()],
@@ -958,7 +1083,7 @@ export class World {
       w.industries = d.industries;
       w.houses = (d.houses as number[][]).map(([x, y, residents, town, district, roof, shop]) => ({ pos: { x, y }, residents, town, district, stop: -1, roof, shop: shop === 1 }));
       w.lots.used = new Set(w.houses.map((h) => lotKey(Math.round(h.pos.x / CONFIG.lot), Math.round(h.pos.y / CONFIG.lot))));
-      w.stops = (d.stops as Pick<Stop, 'id' | 'mode' | 'pos' | 'name' | 'waiting' | 'bornAt'>[]).map((s) => ({ ...s, covers: new Set(), residents: 0, town: -1, industries: [] }));
+      w.stops = (d.stops as Pick<Stop, 'id' | 'mode' | 'pos' | 'name' | 'waiting' | 'bornAt' | 'up' | 'turnedMonth'>[]).map((s) => ({ ...s, covers: new Set(), residents: 0, town: -1, industries: [] }));
       w.stopIndex = new Map(w.stops.map((s) => [s.id, s]));
       w.lines = d.lines;
       w.vehicles = (d.vehicles as (Omit<Vehicle, 'type'> & { type: string })[]).map((v) => ({ ...v, type: VEHICLES[v.type] }));
@@ -1012,17 +1137,57 @@ export function money(n: number): string {
  */
 function upgrade(d: any, fresh: World): any | null {
   if (d.v === SAVE_VERSION) return d;
+  if (d.v === 3) return fromV3(d);
   if (d.v !== 2) return null;
   const model: Record<string, string> = { train: 'steam', freight: 'goods', bus: 'bus', truck: 'truck' };
-  return {
+  return fromV3({
     ...d,
-    v: SAVE_VERSION,
+    v: 3,
     news: [],
     towns: d.towns.map((t: any) => ({ supplyBy: {}, supplyLastBy: {}, history: [], ...t })),
     industries: fresh.industries.map((ind, i) => (d.industries[i] ? { history: [], notedRate: d.industries[i].rate, ...d.industries[i] } : ind)),
     lines: d.lines.map((l: any) => ({ fullLoad: false, history: [], ...l })),
     vehicles: d.vehicles.map((v: any) => ({ ...v, type: model[v.type] ?? v.type, bornAt: d.time, held: 0 })),
+  });
+}
+
+/** Version 3 (no intervals, ratings, upgrades or away income) gains neutral defaults. */
+function fromV3(d: any): any {
+  const econ = { ...d.econ, upgrades: { workshop: 0, marketing: 0, brokerage: 0, service: 0, ...d.econ.upgrades } };
+  // Older ledgers lack the away line; ledgers a save never had keep the fresh company's.
+  for (const k of ['month', 'last', 'year', 'lastYear']) if (econ[k]) econ[k] = { ...emptyLedger(), ...econ[k] };
+  return {
+    ...d,
+    v: SAVE_VERSION,
+    econ,
+    stops: d.stops.map((s: any) => ({ up: { capacity: 0, shelter: 0, reach: 0 }, turnedMonth: 0, ...s })),
+    lines: d.lines.map((l: any) => ({ ...freshService(), ...l })),
   };
+}
+
+/** A line's service settings and counters before its first month. */
+function freshService(): Pick<Line, 'interval' | 'departuresMonth' | 'departuresLast' | 'loadSum' | 'loadN' | 'rating'> {
+  const n = CONFIG.satisfaction.neutral;
+  return {
+    interval: { pax: 0, cargo: 0 },
+    departuresMonth: { pax: 0, cargo: 0 },
+    departuresLast: { pax: 0, cargo: 0 },
+    loadSum: 0,
+    loadN: 0,
+    rating: { wait: n, crowd: n, comfort: n, reliability: null, fare: n, score: n },
+  };
+}
+
+/** The worst part of a rating, in riders' words. */
+export function complaint(r: Rating): string {
+  const parts: [number, string][] = [
+    [r.wait, 'long waits'],
+    [r.crowd, 'too crowded'],
+    [r.comfort, 'old vehicles'],
+    [r.fare, 'fares too high'],
+  ];
+  if (r.reliability !== null) parts.push([r.reliability, 'not enough vehicles for the timetable']);
+  return parts.sort((a, b) => a[0] - b[0])[0][1];
 }
 
 /** Append to a rolling history, keeping the last `max` entries. */

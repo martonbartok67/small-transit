@@ -1,7 +1,7 @@
 import { CONFIG } from './config';
-import type { Ledger, Mode } from './types';
+import type { CompanyUpgrade, Ledger, Mode } from './types';
 
-const emptyLedger = (): Ledger => ({ fares: 0, freight: 0, running: 0, maintenance: 0, interest: 0, construction: 0, vehicles: 0 });
+export const emptyLedger = (): Ledger => ({ fares: 0, freight: 0, running: 0, maintenance: 0, interest: 0, construction: 0, vehicles: 0, away: 0 });
 
 /** Company finances: cash, loan, a ledger for this month and last, and the bankruptcy rule. */
 export class Economy {
@@ -17,6 +17,8 @@ export class Economy {
   negativeMonths = 0;
   /** Ticket price level per mode, 1 = list price. */
   price: Record<Mode, number> = { rail: 1, road: 1 };
+  /** Company-wide upgrade levels, 0 to CONFIG.maxUpgrade. */
+  upgrades: Record<CompanyUpgrade, number> = { workshop: 0, marketing: 0, brokerage: 0, service: 0 };
 
   /** One-off spending the player chooses; refused when cash would go negative. */
   spend(kind: 'construction' | 'vehicles', amount: number): boolean {
@@ -63,9 +65,22 @@ export class Economy {
     this.price[mode] = Math.min(max, Math.max(min, Math.round(level / step) * step));
   }
 
-  /** Demand multiplier at the current price for a mode: cheaper tickets, more riders. */
+  /** Demand multiplier at the current price for a mode: cheaper tickets, more riders; marketing adds more. */
   demand(mode: Mode): number {
-    return Math.pow(this.price[mode], -CONFIG.price.elasticity);
+    return Math.pow(this.price[mode], -CONFIG.price.elasticity) * (1 + CONFIG.upgrades.marketing * this.upgrades.marketing);
+  }
+
+  /** What time away is worth: a share of last month's operating profit per hour, capped; nothing after a losing month. */
+  awayIncome(hours: number): number {
+    const { share, maxHours } = CONFIG.away;
+    const op = Economy.operating(this.last);
+    if (op <= 0 || hours <= 0) return 0;
+    return op * share * Math.min(maxHours, hours);
+  }
+
+  creditAway(amount: number): void {
+    this.cash += amount;
+    this.month.away += amount;
   }
 
   /** Close the month. Returns true when the company is bankrupt. */
@@ -92,6 +107,6 @@ export class Economy {
   }
 
   static net(l: Ledger): number {
-    return l.fares + l.freight + l.running + l.maintenance + l.interest + l.construction + l.vehicles;
+    return l.fares + l.freight + l.running + l.maintenance + l.interest + l.construction + l.vehicles + l.away;
   }
 }

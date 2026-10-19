@@ -146,18 +146,25 @@ function updateDwell(w: World, t: Vehicle, dt: number): void {
       return;
     }
   }
-  // Hold at the first stop until the previous vehicle of the same kind is a fair share of a round trip ahead.
+  // Hold at the first stop until the previous vehicle of the same kind is a fair share of a
+  // round trip ahead, or the line's set interval has passed, whichever is longer.
   if (t.fromIdx === 0) {
     const fleet = w.vehiclesOn(line.id, t.type.carries).length;
-    const gap = (roundTrip(line, t.type) / fleet) * 0.8;
+    const spacing = fleet > 1 ? (roundTrip(line, t.type) / fleet) * 0.8 : 0;
+    const gap = Math.max(spacing, line.interval[t.type.carries]);
     const since = w.time - line.departed[t.type.carries];
-    if (fleet > 1 && since < gap) {
+    if (since < gap) {
       t.dwell = Math.min(gap - since, 2);
       return;
     }
     line.departed[t.type.carries] = w.time;
+    line.departuresMonth[t.type.carries]++;
   }
   w.board(t, line, st, t.dir); // top up with whoever arrived while it stood
+  if (t.type.carries === 'pax') {
+    line.loadSum += loadOf(t) / t.type.capacity;
+    line.loadN++;
+  }
   t.held = 0;
   t.dockedAt = null;
   startSegment(t, line, 0);

@@ -388,6 +388,127 @@ describe('economy', () => {
   }, 120_000);
 });
 
+describe('service and satisfaction', () => {
+  const busLine = (seed: number, buses: number) => {
+    const w = new World(VALLEY, seed);
+    const t = w.towns[0];
+    const r = w.townRadius(t) * 0.6;
+    const ids = [v(t.center.x, t.center.y - r), v(t.center.x - r, t.center.y), v(t.center.x, t.center.y + r), v(t.center.x + r, t.center.y)].map((p) => must(w.placeStop('road', p)).id);
+    const l = must(w.commitLine(null, 'road', ids, true));
+    for (let k = 0; k < buses; k++) must(w.addVehicle(l.id));
+    return { w, l };
+  };
+
+  it('keeps a set interval between departures and says how many vehicles that needs', () => {
+    const { w, l } = busLine(3, 2);
+    w.setInterval(l.id, 'pax', 8);
+    expect(l.interval.pax).toBe(8);
+    const left: number[] = [];
+    let last = l.departed.pax;
+    for (let i = 0; i < 4 * CONFIG.monthSeconds * 60; i++) {
+      w.step(1 / 60);
+      if (l.departed.pax !== last) left.push((last = l.departed.pax));
+    }
+    expect(left.length).toBeGreaterThan(3);
+    for (let i = 1; i < left.length; i++) expect(left[i] - left[i - 1]).toBeGreaterThanOrEqual(8 - 1e-6);
+    expect(w.neededVehicles(l, 'pax')).toBe(Math.ceil(w.roundTripDays(l, 'pax') / 8));
+    w.setInterval(l.id, 'pax', 0);
+    expect(w.neededVehicles(l, 'pax')).toBeNull();
+    w.setInterval(l.id, 'pax', 999);
+    expect(l.interval.pax).toBe(CONFIG.maxInterval);
+  });
+
+  it('rates frequent service above a single overloaded vehicle', () => {
+    const one = busLine(4, 1);
+    const many = busLine(4, 5);
+    runMonths(one.w, 6);
+    runMonths(many.w, 6);
+    expect(many.l.rating.wait).toBeGreaterThan(one.l.rating.wait);
+    expect(many.l.rating.score).toBeGreaterThan(one.l.rating.score);
+    for (const r of [one.l.rating, many.l.rating]) {
+      for (const x of [r.wait, r.crowd, r.comfort, r.fare, r.score]) {
+        expect(x).toBeGreaterThanOrEqual(0);
+        expect(x).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('draws more riders to a well rated line', () => {
+    const queued = (score: number) => {
+      const { w, l } = busLine(5, 1);
+      l.rating.score = score;
+      for (let i = 0; i < 20 * 60; i++) w.step(1 / 60);
+      return w.stops.reduce((n, s) => n + w.waitingTotal(s), 0) + w.delivered + loadOf(w.vehicles[0]);
+    };
+    expect(queued(0.95)).toBeGreaterThan(queued(0.2) * 1.2);
+  });
+
+  it('keeps every bot line rating between 0 and 1', () => {
+    const w = new World(VALLEY, 2);
+    runMonths(w, 24, sensible);
+    for (const l of w.lines) {
+      expect(l.rating.score).toBeGreaterThanOrEqual(0);
+      expect(l.rating.score).toBeLessThanOrEqual(1);
+    }
+  }, 60_000);
+});
+
+describe('upgrades and time away', () => {
+  it('sells three levels of each stop upgrade, each doing its job', () => {
+    const w = new World(VALLEY, 1);
+    const s = must(w.placeStop('road', w.towns[0].center));
+    const cap = w.capacity(s);
+    const residents = s.residents;
+    const cash = w.econ.cash;
+    expect(w.buyStopUpgrade(s.id, 'capacity')).toBeNull();
+    expect(w.capacity(s)).toBeCloseTo(cap * (1 + CONFIG.upgrades.capacity));
+    expect(w.econ.cash).toBeCloseTo(cash - CONFIG.upgrades.stopPrice.road[0]);
+    expect(w.buyStopUpgrade(s.id, 'reach')).toBeNull();
+    expect(w.catchment(s)).toBeCloseTo(CONFIG.stop.road.catchment * (1 + CONFIG.upgrades.reach));
+    expect(s.residents).toBeGreaterThanOrEqual(residents);
+    for (let k = 0; k < 3; k++) expect(w.buyStopUpgrade(s.id, 'shelter')).toBeNull();
+    expect(w.buyStopUpgrade(s.id, 'shelter')).toBe('Fully upgraded');
+    // A sheltered stop keeps more of its waiting crowd.
+    const plain = must(w.placeStop('road', w.towns[1].center));
+    s.waiting = { 'pax:1': 100 };
+    plain.waiting = { 'pax:1': 100 };
+    for (let i = 0; i < 10 * 60; i++) w.step(1 / 60);
+    expect(s.waiting['pax:1']).toBeGreaterThan(plain.waiting['pax:1']);
+  });
+
+  it('sells company upgrades that cut running costs and lift demand and freight pay', () => {
+    const w = new World(VALLEY, 1);
+    const a = must(w.placeStop('rail', w.towns[0].center));
+    const b = must(w.placeStop('rail', w.towns[4].center));
+    const l = must(w.commitLine(null, 'rail', [a.id, b.id], false));
+    const t = must(w.addVehicle(l.id));
+    const run = w.runningCost(t);
+    const demand = w.econ.demand('rail');
+    const freight = w.freightRate(1000);
+    expect(w.buyCompanyUpgrade('workshop')).toBeNull();
+    expect(w.buyCompanyUpgrade('marketing')).toBeNull();
+    expect(w.runningCost(t)).toBeCloseTo(run * (1 - CONFIG.upgrades.workshop));
+    expect(w.econ.demand('rail')).toBeCloseTo(demand * (1 + CONFIG.upgrades.marketing));
+    expect(w.freightRate(1000)).toBeCloseTo(freight);
+    w.econ.cash = 0;
+    expect(w.buyCompanyUpgrade('brokerage')).toMatch(/Needs/);
+  });
+
+  it('pays for time away only after a profitable month, capped', () => {
+    const e = new Economy();
+    expect(e.awayIncome(3)).toBe(0);
+    e.last.fares = 100_000;
+    e.last.running = -40_000;
+    expect(e.awayIncome(2)).toBeCloseTo(60_000 * CONFIG.away.share * 2);
+    expect(e.awayIncome(100)).toBeCloseTo(60_000 * CONFIG.away.share * CONFIG.away.maxHours);
+    const cash = e.cash;
+    e.creditAway(1000);
+    expect(e.cash).toBe(cash + 1000);
+    expect(Economy.net(e.month)).toBe(1000);
+    expect(Economy.operating(e.month)).toBe(0);
+  });
+});
+
 describe('saving', () => {
   it('saves and loads a running game without losing anything', () => {
     const w = new World(VALLEY, 6);
@@ -430,6 +551,35 @@ describe('saving', () => {
     expect(back.over).toBeNull();
     expect(back.delivered).toBeGreaterThan(delivered);
     expect(back.lines.every((l) => Array.isArray(l.history))).toBe(true);
+  }, 60_000);
+
+  it('keeps intervals, ratings and upgrades, and upgrades a version 3 save with defaults', () => {
+    const w = new World(VALLEY, 8);
+    runMonths(w, 8, sensible);
+    const l = w.lines[0];
+    w.setInterval(l.id, 'pax', 6);
+    expect(w.buyStopUpgrade(w.stops[0].id, 'capacity')).toBeNull();
+    w.econ.upgrades.service = 2;
+    const back = must(World.load(VALLEY, w.save()) ?? 'unreadable save');
+    expect(back.lines[0].interval.pax).toBe(6);
+    expect(back.lines[0].rating.score).toBeCloseTo(l.rating.score);
+    expect(back.stops[0].up.capacity).toBe(1);
+    expect(back.econ.upgrades.service).toBe(2);
+    const d = JSON.parse(w.save());
+    const v3 = {
+      ...d,
+      v: 3,
+      econ: { ...d.econ, upgrades: undefined, last: { ...d.econ.last, away: undefined } },
+      stops: d.stops.map(({ up, turnedMonth, ...s }: Record<string, unknown>) => s),
+      lines: d.lines.map(({ interval, departuresMonth, departuresLast, loadSum, loadN, rating, ...x }: Record<string, unknown>) => x),
+    };
+    delete v3.econ.last.away;
+    const old = must(World.load(VALLEY, JSON.stringify(v3)) ?? 'v3 save refused');
+    expect(old.lines.every((x) => x.interval.pax === 0 && x.rating.score === CONFIG.satisfaction.neutral)).toBe(true);
+    expect(old.stops.every((s) => s.up.capacity === 0)).toBe(true);
+    expect(old.econ.last.away).toBe(0);
+    runMonths(old, 2, sensible);
+    expect(old.over).toBeNull();
   }, 60_000);
 
   it('ignores saves it cannot read', () => {
