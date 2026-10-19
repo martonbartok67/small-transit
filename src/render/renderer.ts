@@ -6,47 +6,9 @@ import { loadOf, vehiclePose } from '../sim/vehicles';
 import { LINE_SPACING, money, type World } from '../sim/world';
 import type { Camera } from '../ui/camera';
 import { lineHandles, type Editor } from '../ui/editor';
+import { Fx } from './fx';
+import { SUN, THEME } from './theme';
 
-export const THEME = {
-  outside: '#748a58',
-  grass: '#a2b977',
-  hill: '#b8b687',
-  hillEdge: '#9f9d6f',
-  forest: '#62884a',
-  tree: '#4b6f36',
-  treeLight: '#6f9a52',
-  field: ['#d3c383', '#b7c36c'],
-  fieldRow: ['#bfae6c', '#a2af58'],
-  water: '#5f97c0',
-  waterEdge: '#8fbbd8',
-  road: '#76726b',
-  roadEdge: '#58554f',
-  roadDash: '#ece6d3',
-  street: '#8c887f',
-  ballast: '#a79d8c',
-  sleeper: '#66513f',
-  rail: '#34322f',
-  /** House roofs: the sunlit side, then the shaded side of each gable. */
-  roofs: ['#c46a46', '#9a6249', '#7a828d', '#d0a676'],
-  roofsShade: ['#97492d', '#734431', '#5a616b', '#a8804f'],
-  /** Flat roofs of downtown shops and offices. */
-  shops: ['#a7adb4', '#c2b8a6', '#8d97a4', '#b9bec4'],
-  sidewalk: '#bdb6a8',
-  shadow: 'rgba(25,35,15,0.24)',
-  platform: '#dcd6c8',
-  stationRoof: '#44505b',
-  busStop: '#2d6cae',
-  ink: '#1c2125',
-  label: '#ffffff',
-  bad: '#e2553f',
-  loco: '#2c5b87',
-  coach: '#e6dcc0',
-  wagon: '#6f655b',
-  bus: '#e0ab2e',
-  truck: '#b8412f',
-  lines: ['#e8503a', '#3b7ddd', '#2fae64', '#f0a828', '#9b5ac6', '#14a8b8', '#ec6fa6', '#8a9a2a'],
-  cargo: { grain: '#e5c24a', logs: '#8b5a2b', oil: '#9aa1a8', food: '#d65f5f', goods: '#6a90cc', fuel: '#a463c9' } satisfies Record<Cargo, string>,
-};
 
 /** What the map emphasises: line colours, nothing, house coverage, or cargo flows. */
 export type Layer = 'lines' | 'plain' | 'coverage' | 'cargo';
@@ -56,6 +18,7 @@ const LOUPE_ZOOM = 1.8;
 /** Below this zoom the town roofs come from a cached bitmap instead of being drawn one by one. */
 const ROOF_CACHE_ZOOM = 0.2;
 const ROOF_CACHE_SCALE = 0.25;
+const HOUSE_RISE_MS = 450;
 
 interface Patterns {
   grass: CanvasPattern;
@@ -70,6 +33,15 @@ export class Renderer {
   private h = 0;
   private dpr = 1;
   private pat: Patterns;
+  readonly fx = new Fx();
+  /** Real seconds since the last frame, for effects. */
+  private dt = 0;
+  private lastNow = 0;
+  private ground: { canvas: HTMLCanvasElement; key: string; map: unknown; ready: boolean } = { canvas: document.createElement('canvas'), key: '', map: null, ready: false };
+  private houseBorn = new WeakMap<House, number>();
+  private houseKey: { world: World | null; key: string } = { world: null, key: '' };
+  private stopsSeen: { world: World | null; ids: Set<number> } = { world: null, ids: new Set() };
+  private glints: { map: unknown; pts: { x: number; y: number; phase: number }[] } = { map: null, pts: [] };
   private roofCache: { canvas: HTMLCanvasElement; key: string } | null = null;
   private fields = new Map<number, { poly: Polygon; kind: number }[]>();
   private stopAngles = { version: -1, map: new Map<number, number>() };
@@ -78,6 +50,8 @@ export class Renderer {
   /** Screen px reserved for the HUD above and below the map. */
   insets = { top: 64, bottom: 92 };
   layer: Layer = 'lines';
+  /** Ambient motion (sway, shimmer, clouds, smoke). Off for reduced motion or the low graphics setting. */
+  motion = true;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -105,33 +79,120 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = THEME.outside;
     ctx.fillRect(0, 0, this.w, this.h);
+    this.dt = this.lastNow ? Math.min(0.1, (now - this.lastNow) / 1000) : 0;
+    this.lastNow = now;
+    this.fx.update(this.dt);
+    this.noteNewStops(world);
     this.applyCamera(this.cam.zoom, this.cam.x, this.cam.y, this.cam.cx, this.cam.cy);
-    this.drawScene(world, editor, now, this.cam.zoom);
+    this.drawScene(world, editor, now, this.cam.zoom, true);
     if (editor.editing && editor.touch) this.drawLoupe(world, editor, now);
   }
+
 
   private applyCamera(z: number, x: number, y: number, cx: number, cy: number): void {
     this.ctx.setTransform(this.dpr * z, 0, 0, this.dpr * z, this.dpr * (cx - x * z), this.dpr * (cy - y * z));
   }
 
-  private drawScene(world: World, editor: Editor, now: number, z: number): void {
+  private drawScene(world: World, editor: Editor, now: number, z: number, main = false): void {
     const px = (n: number) => n / z;
-    this.drawGround(world, px);
-    if (z > 0.1) this.drawTrees(world);
+    if (main) this.drawGroundCached(world, px);
+    else this.drawGround(world, px);
+    if (this.motion && z > 0.2) this.drawShimmer(world, now);
+    if (z > 0.1) this.drawTrees(world, now);
     this.drawStreets(world, px, z);
     this.drawRoads(world, px, z);
     this.drawTrack(world, px, z);
-    this.drawBuildings(world, z);
-    for (const ind of world.industries) this.drawIndustry(ind, px, z);
+    this.drawBuildings(world, z, now);
+    for (const ind of world.industries) this.drawIndustry(ind, px, z, now, this.dt);
     if (this.layer === 'coverage') this.drawCoverage(world, px);
     if (this.layer === 'cargo') this.drawCargoFlows(world, px, now);
     if (editor.tool === 'rail' || editor.tool === 'road' || this.layer === 'cargo') this.drawReach(world, editor.tool === 'road' ? 'road' : 'rail', px);
     const pv = editor.preview();
-    this.drawLines(world, editor, px, pv?.lineId ?? null);
+    this.drawLines(world, editor, px, pv?.lineId ?? null, now);
     if (pv) this.drawPreview(world, editor, px);
     for (const s of world.stops) this.drawStop(world, s, px, now);
     for (const t of world.vehicles) this.drawVehicle(t, px, z);
+    this.fx.drawPuffs(this.ctx);
+    if (this.motion) this.drawClouds(world, now);
     this.drawLabels(world, px, z);
+    this.fx.drawFloaters(this.ctx, px, money);
+  }
+
+  /** Light glinting on the water: short streaks that drift back and forth. */
+  private drawShimmer(world: World, now: number): void {
+    if (this.glints.map !== world.map) this.glints = { map: world.map, pts: scatterGlints(world.map.water) };
+    const ctx = this.ctx;
+    const t = now / 1000;
+    ctx.strokeStyle = 'rgba(235,248,255,0.35)';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (const g of this.glints.pts) {
+      if (!this.visible(g, 40)) continue;
+      const k = Math.sin(t * 0.9 + g.phase);
+      const x = g.x + k * 14;
+      const len = 6 + 12 * Math.abs(k);
+      ctx.moveTo(x - len, g.y);
+      ctx.lineTo(x + len, g.y);
+    }
+    ctx.stroke();
+  }
+
+  /** A few soft cloud shadows drifting across the valley. */
+  private drawClouds(world: World, now: number): void {
+    const ctx = this.ctx;
+    const m = world.map;
+    const span = m.halfW * 2 + 2400;
+    const t = now / 1000;
+    for (let i = 0; i < 5; i++) {
+      const x = (((i * 1777 + t * 14) % span) + span) % span - m.halfW - 1200;
+      const y = -m.halfH + ((i * 1013) % (m.halfH * 2)) + Math.sin(t * 0.05 + i) * 80;
+      for (const [dx, dy, r] of [[0, 0, 520], [380, 90, 380], [-360, 120, 340]]) {
+        const cx = x + dx;
+        const cy = y + dy;
+        if (!this.visible(v(cx, cy), r)) continue;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+        g.addColorStop(0, 'rgba(18,30,40,0.10)');
+        g.addColorStop(1, 'rgba(18,30,40,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      }
+    }
+  }
+
+  /**
+   * The landscape under everything only changes when the camera moves. Once the camera
+   * has held still for a frame it is painted into a bitmap, and later frames just copy it.
+   */
+  private drawGroundCached(world: World, px: (n: number) => number): void {
+    const c = this.cam;
+    const key = `${c.x}|${c.y}|${c.zoom}|${this.canvas.width}|${this.canvas.height}|${c.cx}|${c.cy}`;
+    const g = this.ground;
+    if (g.key === key && g.map === world.map) {
+      const ctx = this.ctx;
+      if (!g.ready) {
+        const cv = g.canvas;
+        cv.width = this.canvas.width;
+        cv.height = this.canvas.height;
+        const off = cv.getContext('2d')!;
+        off.setTransform(ctx.getTransform());
+        const main = this.ctx;
+        this.ctx = off;
+        this.drawGround(world, px);
+        this.ctx = main;
+        g.ready = true;
+      }
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(g.canvas, 0, 0);
+      ctx.restore();
+      return;
+    }
+    // Still moving: draw directly and remember where the camera is.
+    g.key = key;
+    g.map = world.map;
+    g.ready = false;
+    this.drawGround(world, px);
   }
 
   private polygon(poly: Vec2[]): void {
@@ -166,27 +227,50 @@ export class Renderer {
       this.polygon(f.poly);
       ctx.fill();
     }
-    ctx.fillStyle = this.pat.hill;
+    // Hills and forests stand up from the plain: a shadow on the far side of the sun first.
+    ctx.fillStyle = THEME.shadow;
+    for (const poly of [...m.hills, ...m.forests]) {
+      const d = m.forests.includes(poly) ? 10 : 22;
+      this.polygon(poly.map((p) => v(p.x + SUN.x * d, p.y + SUN.y * d)));
+      ctx.fill();
+    }
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = THEME.hillEdge;
     ctx.lineWidth = px(1.5);
-    ctx.lineJoin = 'round';
     for (const h of m.hills) {
+      ctx.fillStyle = this.pat.hill;
       this.polygon(h);
       ctx.fill();
       ctx.stroke();
+      // Contour bands, each a little lighter and nudged toward the sun.
+      shrinkRings(h).forEach((ring, i) => {
+        ctx.fillStyle = THEME.hillBands[i];
+        this.polygon(ring);
+        ctx.fill();
+      });
     }
     ctx.fillStyle = this.pat.forest;
     for (const f of m.forests) {
       this.polygon(f);
       ctx.fill();
     }
-    ctx.fillStyle = THEME.water;
-    ctx.strokeStyle = THEME.waterEdge;
-    ctx.lineWidth = Math.max(px(2), 8);
+    // Water: a lighter shallow rim and a bright shoreline inside each body.
     for (const w of m.water) {
+      ctx.save();
       this.polygon(w);
-      ctx.stroke();
+      ctx.fillStyle = THEME.waterDeep;
       ctx.fill();
+      ctx.clip();
+      ctx.strokeStyle = THEME.water;
+      ctx.lineWidth = 60;
+      ctx.stroke();
+      ctx.strokeStyle = THEME.waterShallow;
+      ctx.lineWidth = 26;
+      ctx.stroke();
+      ctx.strokeStyle = THEME.waterEdge;
+      ctx.lineWidth = Math.max(px(1.5), 6);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -267,27 +351,28 @@ export class Renderer {
     ctx.stroke();
   }
 
-  /** Scattered trees in the countryside, laid out once per map. */
-  private drawTrees(world: World): void {
+  /** Scattered trees in the countryside, laid out once per map: shadow, canopy, then a sunlit cap that sways a little. */
+  private drawTrees(world: World, now: number): void {
     if (this.trees.map !== world.map) this.trees = { map: world.map, pts: scatterTrees(world) };
     const ctx = this.ctx;
-    const pts = this.trees.pts;
-    for (const [color, k, dx] of [
-      [THEME.shadow, 1, 4],
-      [THEME.tree, 1, 0],
-      [THEME.treeLight, 0.45, -0.3],
-    ] as const) {
+    const pts = this.trees.pts.filter((t) => this.visible(t, 40));
+    const sway = this.motion ? now / 900 : 0;
+    const pass = (color: string, place: (t: { x: number; y: number; r: number }, i: number) => [number, number, number]) => {
       ctx.fillStyle = color;
       ctx.beginPath();
-      for (const t of pts) {
-        if (!this.visible(t, 40)) continue;
-        const r = t.r * k;
-        const ox = dx > 1 ? dx : dx * t.r;
-        ctx.moveTo(t.x + ox + r, t.y + ox);
-        ctx.arc(t.x + ox, t.y + ox, r, 0, Math.PI * 2);
-      }
+      pts.forEach((t, i) => {
+        const [x, y, r] = place(t, i);
+        ctx.moveTo(x + r, y);
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+      });
       ctx.fill();
-    }
+    };
+    pass(THEME.shadow, (t) => [t.x + SUN.x * t.r * 0.8, t.y + SUN.y * t.r * 0.8, t.r * 1.05]);
+    pass(THEME.tree, (t) => [t.x, t.y, t.r]);
+    pass(THEME.treeLight, (t) => {
+      const s = Math.sin(sway + t.x * 0.013 + t.y * 0.007) * t.r * 0.08;
+      return [t.x - t.r * 0.3 + s, t.y - t.r * 0.32, t.r * 0.5];
+    });
   }
 
   private drawRoads(world: World, px: (n: number) => number, z: number): void {
@@ -298,7 +383,8 @@ export class Renderer {
     const width = Math.max(20, px(3));
     for (const [color, wd] of [
       [THEME.roadEdge, width + Math.max(4, px(1))],
-      [THEME.road, width],
+      [THEME.roadKerb, width],
+      [THEME.road, width - Math.max(2, px(0.5))],
     ] as const) {
       ctx.strokeStyle = color;
       ctx.lineWidth = wd;
@@ -323,12 +409,17 @@ export class Renderer {
     if (!ways.length) return;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    for (const w of ways) {
-      ctx.strokeStyle = THEME.ballast;
-      ctx.lineWidth = Math.max(w.lanes * LINE_SPACING.rail + 8, px(4));
-      ctx.beginPath();
-      this.trace(w.path);
-      ctx.stroke();
+    for (const [color, extra] of [
+      [THEME.ballastEdge, 4],
+      [THEME.ballast, 0],
+    ] as const) {
+      ctx.strokeStyle = color;
+      for (const w of ways) {
+        ctx.lineWidth = Math.max(w.lanes * LINE_SPACING.rail + 8, px(4)) + extra;
+        ctx.beginPath();
+        this.trace(w.path);
+        ctx.stroke();
+      }
     }
     for (const w of ways) {
       for (let k = 0; k < w.lanes; k++) {
@@ -343,12 +434,17 @@ export class Renderer {
           this.trace(path);
           ctx.stroke();
           ctx.setLineDash([]);
-          ctx.strokeStyle = THEME.rail;
-          ctx.lineWidth = 1.1;
-          for (const side of [-2.4, 2.4]) {
-            ctx.beginPath();
-            this.trace(offsetPath(path, side));
-            ctx.stroke();
+          for (const [color, wd, dy] of [
+            [THEME.rail, 1.3, 0],
+            [THEME.railShine, 0.45, -0.3],
+          ] as const) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = wd;
+            for (const side of [-2.4, 2.4]) {
+              ctx.beginPath();
+              this.trace(offsetPath(path, side + dy));
+              ctx.stroke();
+            }
           }
           ctx.lineCap = 'round';
         } else {
@@ -363,10 +459,46 @@ export class Renderer {
   }
 
   /** Houses with gabled roofs (sunlit and shaded halves), downtown blocks with flat roofs, and their shadows. */
-  private drawBuildings(world: World, z: number): void {
+  private drawBuildings(world: World, z: number, now: number): void {
+    this.noteNewHouses(world, now);
     if (z < ROOF_CACHE_ZOOM) return this.drawBuildingCache(world);
     const vis = world.houses.filter((h) => this.visible(h.pos, 40));
-    paintBuildings(this.ctx, vis, z);
+    // Houses that just went up rise out of the ground; everything else draws in one batch.
+    const rising = this.motion ? vis.filter((h) => now - (this.houseBorn.get(h) ?? 0) < HOUSE_RISE_MS) : [];
+    paintBuildings(this.ctx, rising.length ? vis.filter((h) => !rising.includes(h)) : vis, z);
+    if (rising.length) paintBuildings(this.ctx, rising, z, (h) => easeOutBack(Math.min(1, (now - this.houseBorn.get(h)!) / HOUSE_RISE_MS)));
+  }
+
+  /** Remember when each house first appeared; houses already there when a game loads count as old. */
+  private noteNewHouses(world: World, now: number): void {
+    const key = `${world.catchVersion}:${world.houses.length}`;
+    if (this.houseKey.world === world && this.houseKey.key === key) return;
+    const fresh = this.houseKey.world === world;
+    this.houseKey = { world, key };
+    for (const h of world.houses) {
+      if (this.houseBorn.has(h)) continue;
+      this.houseBorn.set(h, fresh ? now : 0);
+      if (fresh && this.motion) this.fx.burst(h.pos, 10, 4);
+    }
+  }
+
+  /** Dust where a stop was just built. */
+  private noteNewStops(world: World): void {
+    if (this.stopsSeen.world !== world) this.stopsSeen = { world, ids: new Set(world.stops.map((s) => s.id)) };
+    for (const s of world.stops) {
+      if (this.stopsSeen.ids.has(s.id)) continue;
+      this.stopsSeen.ids.add(s.id);
+      if (this.motion) this.fx.burst(s.pos, s.mode === 'rail' ? 40 : 22, 12);
+    }
+  }
+
+  /** Dust along a newly built line. */
+  lineBuilt(paths: Vec2[][]): void {
+    if (!this.motion) return;
+    let n = 0;
+    for (const path of paths) {
+      for (let i = 0; i < path.length && n < 40; i += Math.max(1, Math.floor(path.length / 8)), n++) this.fx.burst(path[i], 14, 3);
+    }
   }
 
   /** Zoomed out, all buildings come from one bitmap that is redrawn only when houses change. */
@@ -387,106 +519,146 @@ export class Renderer {
 
   // ---------- industry ----------
 
-  private drawIndustry(ind: Industry, px: (n: number) => number, z: number): void {
+  private drawIndustry(ind: Industry, px: (n: number) => number, z: number, now: number, dt: number): void {
     if (!this.visible(ind.pos, 300)) return;
     const ctx = this.ctx;
     const { x, y } = ind.pos;
+    const I = THEME.industry;
     if (z < 0.14) {
       // A marker that stays readable when the whole map is on screen.
       const r = px(7);
+      ctx.fillStyle = THEME.shadow;
+      roundRect(ctx, x - r + px(2), y - r + px(2.5), r * 2, r * 2, px(3));
+      ctx.fill();
       ctx.fillStyle = THEME.cargo[ind.produces];
-      ctx.strokeStyle = THEME.ink;
+      ctx.strokeStyle = THEME.label;
       ctx.lineWidth = px(2);
-      ctx.beginPath();
-      ctx.rect(x - r, y - r, r * 2, r * 2);
+      roundRect(ctx, x - r, y - r, r * 2, r * 2, px(3));
       ctx.fill();
       ctx.stroke();
       return;
     }
-    const box = (bx: number, by: number, w: number, h: number, fill: string, roof?: string) => {
+    const working = ind.accepts ? ind.receivedLast > 0 : ind.rate > 0;
+    const t = this.motion ? now / 1000 : 0;
+    const smoke = (cx: number, cy: number, kind: 'smoke' | 'steam' = 'smoke') => {
+      if (this.motion && working && z > 0.2 && Math.random() < dt * 5) this.fx.puff(kind, v(x + cx, y + cy), 7, 10 + Math.random() * 8, -14, 2.4);
+    };
+    const yard = (bx: number, by: number, w: number, h: number, fill: string) => {
       ctx.fillStyle = fill;
-      ctx.fillRect(x + bx, y + by, w, h);
+      roundRect(ctx, x + bx, y + by, w, h, 10);
+      ctx.fill();
+    };
+    // A building with height: shadow, south wall, then roof with a lit ridge band.
+    const box = (bx: number, by: number, w: number, h: number, fill: string, roof?: string, H = 10) => {
+      ctx.fillStyle = THEME.shadow;
+      ctx.fillRect(x + bx + SUN.x * H * 1.4, y + by + SUN.y * H * 1.4, w, h);
+      ctx.fillStyle = shade(fill, -0.22);
+      ctx.fillRect(x + bx, y + by + h - H, w, H);
+      ctx.fillStyle = fill;
+      ctx.fillRect(x + bx, y + by - H, w, h);
       if (roof) {
         ctx.fillStyle = roof;
-        ctx.fillRect(x + bx, y + by, w, h * 0.45);
+        ctx.fillRect(x + bx, y + by - H + h * 0.5, w, h * 0.5);
       }
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x + bx, y + by, w, h);
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(x + bx, y + by - H, w, h + H);
     };
+    // A round tank: shadow, body, and a highlight toward the sun.
     const silo = (cx: number, cy: number, r: number, fill: string) => {
+      ctx.fillStyle = THEME.shadow;
+      ctx.beginPath();
+      ctx.arc(x + cx + SUN.x * r * 0.7, y + cy + SUN.y * r * 0.7, r, 0, Math.PI * 2);
+      ctx.fill();
       ctx.fillStyle = fill;
       ctx.beginPath();
       ctx.arc(x + cx, y + cy, r, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1.2;
       ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.beginPath();
+      ctx.arc(x + cx - r * 0.35, y + cy - r * 0.35, r * 0.4, 0, Math.PI * 2);
+      ctx.fill();
     };
     const logs = (lx: number, ly: number) => {
-      for (let i = 0; i < 4; i++) box(lx, ly + i * 7, 34, 5, THEME.cargo.logs);
+      for (let i = 0; i < 4; i++) box(lx, ly + i * 7, 34, 5, THEME.cargo.logs, undefined, 2);
     };
     switch (ind.kind) {
       case 'farm':
-        ctx.fillStyle = '#c9b88d';
-        ctx.fillRect(x - 150, y - 110, 300, 220);
-        box(-60, -40, 70, 50, '#a8432f', '#7d2f22');
-        box(25, -30, 40, 30, '#9b8f7d', '#6f655a');
-        silo(-80, 30, 16, '#d8d2c4');
-        silo(-45, 35, 12, '#d8d2c4');
+        yard(-150, -110, 300, 220, I.farmYard);
+        box(-60, -40, 70, 50, I.barn, I.barnRoof, 14);
+        box(25, -30, 40, 30, I.shed, I.shedRoof, 8);
+        silo(-80, 30, 16, I.silo);
+        silo(-45, 35, 12, I.silo);
         break;
       case 'forest':
-        box(-30, -20, 50, 34, '#7a5b3a', '#5a4129');
+        box(-30, -20, 50, 34, I.lumberHut, I.lumberRoof, 9);
         logs(30, -26);
         logs(-70, 20);
+        smoke(-10, -36, 'steam');
         break;
       case 'foodplant':
-        ctx.fillStyle = '#9a978e';
-        ctx.fillRect(x - 120, y - 80, 240, 170);
-        box(-100, -60, 120, 80, '#c9c3b5', '#8d939b');
-        box(30, -55, 70, 50, '#b9b2a2', '#7e848c');
-        silo(-70, 50, 18, '#e3ded2');
-        silo(-30, 50, 18, '#e3ded2');
-        box(60, 20, 14, 40, '#7b4a3a');
+        yard(-120, -80, 240, 170, I.concrete);
+        box(-100, -60, 120, 80, I.hall, I.hallRoof, 16);
+        box(30, -55, 70, 50, I.hall2, I.hall2Roof, 12);
+        silo(-70, 50, 18, I.tank);
+        silo(-30, 50, 18, I.tank);
+        box(60, 20, 14, 40, I.chimney, undefined, 30);
+        smoke(67, -12);
         break;
       case 'oilwell': {
-        ctx.fillStyle = '#b9ab88';
-        ctx.fillRect(x - 120, y - 80, 240, 170);
-        for (const [jx, jy] of [[-70, -30], [10, -45], [-30, 30]]) {
-          // Pumpjack: a base, a beam and a horse head.
-          box(jx - 14, jy + 6, 28, 8, '#4a4a4a');
-          ctx.strokeStyle = '#2b2b2b';
+        yard(-120, -80, 240, 170, I.oilYard);
+        [[-70, -30], [10, -45], [-30, 30]].forEach(([jx, jy], i) => {
+          // Pumpjack: a base, a beam that rocks while the well produces, and a horse head.
+          box(jx - 14, jy + 6, 28, 8, I.pump, undefined, 3);
+          const tilt = working ? Math.sin(t * 2.2 + i * 1.7) * 0.35 : 0;
+          const ca = Math.cos(tilt) * 17;
+          const sa = Math.sin(tilt) * 17;
+          ctx.strokeStyle = I.pumpBeam;
           ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
           ctx.beginPath();
-          ctx.moveTo(x + jx - 16, y + jy - 6);
-          ctx.lineTo(x + jx + 16, y + jy + 2);
+          ctx.moveTo(x + jx - ca, y + jy - 2 - sa);
+          ctx.lineTo(x + jx + ca, y + jy - 2 + sa);
           ctx.stroke();
-          silo(jx + 18, jy + 3, 4, '#2b2b2b');
-        }
-        silo(65, 20, 22, '#d8d2c4');
-        silo(65, -30, 16, '#d8d2c4');
+          ctx.fillStyle = I.pumpBeam;
+          ctx.beginPath();
+          ctx.arc(x + jx + ca, y + jy - 2 + sa, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        silo(65, 20, 22, I.tank);
+        silo(65, -30, 16, I.tank);
         break;
       }
-      case 'refinery':
-        ctx.fillStyle = '#9d9a92';
-        ctx.fillRect(x - 140, y - 90, 280, 190);
-        for (const [tx, ty, tr] of [[-100, -55, 22], [-50, -55, 22], [-100, 0, 22], [-50, 0, 22]]) silo(tx, ty, tr, '#e2ddd0');
-        box(10, -70, 18, 90, '#6d7680');
-        box(40, -60, 14, 80, '#6d7680');
-        box(70, -40, 50, 60, '#c9c3b5', '#8d939b');
-        box(-120, 45, 110, 30, '#b9b2a2', '#7e848c');
-        ctx.fillStyle = '#f2a43a';
+      case 'refinery': {
+        yard(-140, -90, 280, 190, I.concrete);
+        for (const [tx, ty, tr] of [[-100, -55, 22], [-50, -55, 22], [-100, 0, 22], [-50, 0, 22]]) silo(tx, ty, tr, I.tank);
+        box(10, -70, 18, 90, I.pipe, undefined, 30);
+        box(40, -60, 14, 80, I.pipe, undefined, 24);
+        box(70, -40, 50, 60, I.hall, I.hallRoof, 14);
+        box(-120, 45, 110, 30, I.hall2, I.hall2Roof, 8);
+        // The flare stack flickers while the refinery runs.
+        const f = working ? 0.75 + 0.25 * Math.sin(t * 13) * Math.sin(t * 7.3) : 0.35;
+        ctx.fillStyle = 'rgba(255,170,60,0.25)';
         ctx.beginPath();
-        ctx.arc(x + 100, y - 70, 7, 0, Math.PI * 2);
+        ctx.arc(x + 100, y - 70, 14 * f, 0, Math.PI * 2);
         ctx.fill();
+        ctx.fillStyle = I.flare;
+        ctx.beginPath();
+        ctx.arc(x + 100, y - 70, 7 * f, 0, Math.PI * 2);
+        ctx.fill();
+        smoke(19, -102);
         break;
+      }
       case 'sawmill':
-        ctx.fillStyle = '#9b8e74';
-        ctx.fillRect(x - 130, y - 70, 260, 150);
-        box(-110, -45, 150, 50, '#9b7650', '#6d4f33');
+        yard(-130, -70, 260, 150, I.sawYard);
+        box(-110, -45, 150, 50, I.sawHall, I.sawRoof, 14);
         logs(55, -45);
         logs(55, 10);
-        box(-100, 25, 60, 30, '#c8a46e');
+        box(-100, 25, 60, 30, I.planks, undefined, 4);
+        smoke(-20, -62, 'steam');
         break;
     }
   }
@@ -597,7 +769,7 @@ export class Renderer {
     return selected ? base * 2 : base;
   }
 
-  private drawLines(world: World, editor: Editor, px: (n: number) => number, skip: number | null): void {
+  private drawLines(world: World, editor: Editor, px: (n: number) => number, skip: number | null, now: number): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -607,14 +779,40 @@ export class Renderer {
       // Other layers hide line colours, except for the line being looked at.
       if (this.layer !== 'lines' && !selected) continue;
       const lw = this.lineWidth(px, selected);
-      ctx.strokeStyle = THEME.lines[line.color];
-      ctx.globalAlpha = selected || editor.selectedLine < 0 ? 0.9 : 0.45;
-      ctx.lineWidth = lw;
-      ctx.beginPath();
-      for (const seg of line.segs) this.trace(seg.path);
+      const color = THEME.lines[line.color];
+      const trace = () => {
+        ctx.beginPath();
+        for (const seg of line.segs) this.trace(seg.path);
+      };
+      ctx.globalAlpha = selected || editor.selectedLine < 0 ? 1 : 0.4;
+      trace();
+      if (selected && this.motion) {
+        // A soft glow in the line's colour around the line being looked at.
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.25;
+        ctx.lineWidth = lw * 3.2;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = THEME.lineCasing;
+      ctx.lineWidth = lw + Math.max(px(2), 3);
       ctx.stroke();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+      if (selected) {
+        // Light dashes flowing along the line, so it reads as a route in motion.
+        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+        ctx.lineWidth = lw * 0.35;
+        ctx.setLineDash([px(4), px(14)]);
+        ctx.lineDashOffset = this.motion ? -px((now / 1000) * 36) : 0;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+      }
       ctx.globalAlpha = 1;
       if (editor.tool !== 'select') continue;
+      ctx.strokeStyle = color;
       for (const h of lineHandles(line, editor.handleLength())) {
         ctx.lineWidth = Math.max(lw, px(3));
         ctx.beginPath();
@@ -704,83 +902,173 @@ export class Renderer {
     if (!this.visible(s.pos, 200)) return;
     const ctx = this.ctx;
     const age = world.time - s.bornAt;
-    const pop = age < 0.4 ? 0.7 + 0.3 * (age / 0.4) : 1;
+    // Springs up when built: overshoots a little, then settles.
+    const pop = age < 0.5 ? easeOutBack(Math.max(0, age) / 0.5) : 1;
     const full = world.waitingTotal(s) >= CONFIG.stop[s.mode].capacity * 0.9;
+    const docked = world.vehicles.some((t) => t.state === 'dwelling' && t.dockedAt === s.id);
+    if (docked && this.motion) {
+      // Boarding: a soft ring ripples out from the stop while a vehicle is in.
+      const k = ((now / 1100) % 1 + 1) % 1;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - k)).toFixed(3) + ')';
+      ctx.lineWidth = px(2);
+      ctx.beginPath();
+      ctx.arc(s.pos.x, s.pos.y, Math.max(px(10), 18) + px(18) * k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.save();
     ctx.translate(s.pos.x, s.pos.y);
     if (s.mode === 'rail') {
       ctx.rotate(this.stopAngle(world, s));
       const L = Math.max(100, px(18)) * pop;
       const W = Math.max(30, px(9)) * pop;
+      const H = W * 0.35;
+      const sx = SUN.x * H;
+      const sy = SUN.y * H;
+      ctx.fillStyle = THEME.shadow;
+      ctx.fillRect(-L / 2 + sx, -W / 2 + sy, L, W);
       ctx.fillStyle = THEME.platform;
       ctx.strokeStyle = THEME.ink;
       ctx.lineWidth = Math.max(2, px(1.5));
-      ctx.fillRect(-L / 2, -W / 2, L, W);
-      ctx.strokeRect(-L / 2, -W / 2, L, W);
+      roundRect(ctx, -L / 2, -W / 2, L, W, W * 0.15);
+      ctx.fill();
+      ctx.stroke();
+      // Canopy over the platform, with a lit ridge.
+      ctx.fillStyle = THEME.shadow;
+      ctx.fillRect(-L * 0.3 + sx, -W / 2 - W * 0.7 + sy, L * 0.6, W * 0.7);
       ctx.fillStyle = THEME.stationRoof;
-      ctx.fillRect(-L * 0.3, -W / 2 - W * 0.7, L * 0.6, W * 0.7);
-      ctx.strokeRect(-L * 0.3, -W / 2 - W * 0.7, L * 0.6, W * 0.7);
+      roundRect(ctx, -L * 0.3, -W / 2 - W * 0.7, L * 0.6, W * 0.7, W * 0.12);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = THEME.stationRoofLight;
+      ctx.fillRect(-L * 0.3 + 2, -W / 2 - W * 0.7 + 2, L * 0.6 - 4, W * 0.22);
     } else {
       const r = Math.max(11, px(6)) * pop;
+      ctx.fillStyle = THEME.shadow;
+      roundRect(ctx, -r + r * 0.25, -r + r * 0.35, r * 2, r * 2, r * 0.45);
+      ctx.fill();
       ctx.fillStyle = THEME.busStop;
       ctx.strokeStyle = THEME.label;
       ctx.lineWidth = Math.max(2.5, px(1.6));
-      roundRect(ctx, -r, -r, r * 2, r * 2, r * 0.35);
+      roundRect(ctx, -r, -r, r * 2, r * 2, r * 0.45);
       ctx.fill();
+      ctx.fillStyle = THEME.busStopLight;
+      roundRect(ctx, -r, -r, r * 2, r, r * 0.45);
+      ctx.fill();
+      roundRect(ctx, -r, -r, r * 2, r * 2, r * 0.45);
       ctx.stroke();
+      // A little bus face: windscreen and two headlights.
       ctx.fillStyle = THEME.label;
-      ctx.fillRect(-r * 0.45, -r * 0.45, r * 0.9, r * 0.5);
+      roundRect(ctx, -r * 0.5, -r * 0.5, r, r * 0.5, r * 0.12);
+      ctx.fill();
+      ctx.fillRect(-r * 0.5, r * 0.2, r * 0.22, r * 0.18);
+      ctx.fillRect(r * 0.28, r * 0.2, r * 0.22, r * 0.18);
     }
     ctx.restore();
     if (full) {
-      // A small pulsing marker instead of a number: this stop turns people away.
-      const r = Math.max(px(4), 6) * (0.85 + 0.15 * Math.sin(now / 200));
+      // A pulsing warning ring: this stop turns people away.
+      const k = this.motion ? (now / 900) % 1 : 0.4;
+      const at = v(s.pos.x + px(12), s.pos.y - px(12));
       ctx.fillStyle = THEME.bad;
       ctx.beginPath();
-      ctx.arc(s.pos.x + px(12), s.pos.y - px(12), r, 0, Math.PI * 2);
+      ctx.arc(at.x, at.y, Math.max(px(4), 6), 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = THEME.bad;
+      ctx.globalAlpha = 1 - k;
+      ctx.lineWidth = px(2);
+      ctx.beginPath();
+      ctx.arc(at.x, at.y, Math.max(px(4), 6) + px(10) * k, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
   }
 
   private drawVehicle(t: Vehicle, px: (n: number) => number, z: number): void {
     if (!this.visible(t.path[0], 4000) && !this.visible(t.path[t.path.length - 1], 4000)) return;
     const ctx = this.ctx;
-    const k = t.type.key;
-    const len = Math.max(t.type.carLength, px(k === 'train' || k === 'freight' ? 7 : 6));
-    const wid = Math.max(k === 'train' || k === 'freight' ? 9 : 8, px(3.5));
+    const k = t.type.kind;
+    const rail = k === 'train' || k === 'freight';
+    const len = Math.max(t.type.carLength, px(rail ? 7 : 6));
+    const wid = Math.max(rail ? 9 : 8, px(3.5));
     const gap = Math.max(2, px(0.8));
     const main = mainCargo(t);
     const fill = loadOf(t) / t.type.capacity;
-    ctx.globalAlpha = t.line < 0 ? 0.5 : 1;
+    const detail = z > 0.3;
+    const sh = Math.max(2.5, px(1.2));
+    const cars: { x: number; y: number; a: number }[] = [];
     for (let c = 0; c < t.type.cars; c++) {
       const pose = vehiclePose(t, c * (len + gap));
+      cars.push({ x: pose.p.x, y: pose.p.y, a: Math.atan2(pose.t.y, pose.t.x) });
+    }
+    ctx.globalAlpha = t.line < 0 ? 0.5 : 1;
+    // Ground shadows first, so no car's shadow falls on the car ahead.
+    ctx.fillStyle = THEME.shadow;
+    for (const c of cars) {
       ctx.save();
-      ctx.translate(pose.p.x, pose.p.y);
-      ctx.rotate(Math.atan2(pose.t.y, pose.t.x));
+      ctx.translate(c.x + SUN.x * sh, c.y + SUN.y * sh);
+      ctx.rotate(c.a);
+      roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, 3));
+      ctx.fill();
+      ctx.restore();
+    }
+    cars.forEach((p, c) => {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.a);
+      const lead = c === 0;
       let body: string = THEME.coach;
       if (k === 'bus') body = t.type.livery;
       else if (k === 'truck') body = THEME.wagon;
-      else if (c === 0) body = t.type.livery;
+      else if (lead) body = t.type.livery;
       else if (k === 'freight') body = THEME.wagon;
+      if (lead && detail && this.motion && t.state === 'moving') {
+        // Headlights: a faint cone ahead of the lead car.
+        ctx.fillStyle = THEME.headlight;
+        ctx.beginPath();
+        ctx.moveTo(len / 2, -wid * 0.3);
+        ctx.lineTo(len / 2 + wid * 2.4, -wid * 0.95);
+        ctx.lineTo(len / 2 + wid * 2.4, wid * 0.95);
+        ctx.lineTo(len / 2, wid * 0.3);
+        ctx.fill();
+      }
       ctx.fillStyle = body;
+      // Locomotives get a rounded nose; everything else a rounded box.
+      const nose = rail && lead ? wid / 2 : Math.min(wid / 3, 3);
       roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, 3));
       ctx.fill();
+      if (nose > Math.min(wid / 3, 3)) {
+        ctx.beginPath();
+        ctx.arc(len / 2 - nose, 0, nose, -Math.PI / 2, Math.PI / 2);
+        ctx.fill();
+      }
       ctx.strokeStyle = 'rgba(0,0,0,0.45)';
       ctx.lineWidth = Math.max(1, px(0.6));
+      roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, 3));
       ctx.stroke();
-      if (z > 0.3) {
-        if (k === 'bus' || (k === 'train' && c > 0)) {
-          // Window band.
-          ctx.fillStyle = 'rgba(30,40,50,0.55)';
-          ctx.fillRect(-len / 2 + 3, -wid / 2 + 2, len - 6, wid * 0.28);
+      if (detail) {
+        // Roof highlight on the sunny side.
+        ctx.fillStyle = 'rgba(255,255,255,0.22)';
+        ctx.fillRect(-len / 2 + 2, -wid / 2 + 1, len - 4, wid * 0.22);
+        if (k === 'bus' || (k === 'train' && !lead)) {
+          // Windows down both sides.
+          ctx.fillStyle = THEME.window;
+          ctx.fillRect(-len / 2 + 3, -wid / 2 + 1.2, len - 6, wid * 0.16);
+          ctx.fillRect(-len / 2 + 3, wid / 2 - 1.2 - wid * 0.16, len - 6, wid * 0.16);
+        }
+        if (lead) {
+          // Windscreen or cab window at the front.
+          ctx.fillStyle = THEME.window;
+          ctx.fillRect(len / 2 - (rail ? nose + 3 : 4), -wid * 0.32, 2.2, wid * 0.64);
         }
         if (k === 'truck') {
           ctx.fillStyle = t.type.livery;
-          ctx.fillRect(len / 2 - len * 0.3, -wid / 2, len * 0.3, wid);
+          roundRect(ctx, len / 2 - len * 0.3, -wid / 2, len * 0.3, wid, 2);
+          ctx.fill();
+          ctx.fillStyle = THEME.window;
+          ctx.fillRect(len / 2 - 3.5, -wid * 0.32, 2, wid * 0.64);
         }
       }
       // Cargo shows as a coloured load filling the wagon or truck bed.
-      if ((k === 'freight' && c > 0) || k === 'truck') {
+      if ((k === 'freight' && !lead) || k === 'truck') {
         if (main && fill > 0.02) {
           ctx.fillStyle = THEME.cargo[main];
           const bed = k === 'truck' ? len * 0.65 : len - 4;
@@ -788,8 +1076,20 @@ export class Renderer {
         }
       }
       ctx.restore();
-    }
+    });
     ctx.globalAlpha = 1;
+    // Exhaust: steam engines puff white, diesels a little grey smoke while pulling away.
+    if (this.motion && detail && t.state === 'moving' && this.dt > 0) {
+      const steam = t.type.key === 'steam' || t.type.key === 'goods';
+      const pulling = t.speed < t.type.speed * 0.9;
+      const rate = steam ? 4 + (t.speed / t.type.speed) * 6 : rail && pulling ? 4 : 0;
+      if (rate && Math.random() < this.dt * rate) {
+        const p = cars[0];
+        const ox = Math.cos(p.a) * len * 0.25;
+        const oy = Math.sin(p.a) * len * 0.25;
+        this.fx.puff(steam ? 'steam' : 'smoke', v(p.x + ox, p.y + oy), wid * (steam ? 0.55 : 0.4), 6, -10, steam ? 1.6 : 1.1);
+      }
+    }
   }
 
   // ---------- labels ----------
@@ -798,11 +1098,34 @@ export class Renderer {
     const ctx = this.ctx;
     ctx.font = `${weight} ${px(size)}px system-ui, sans-serif`;
     ctx.lineWidth = px(3.5);
-    ctx.strokeStyle = 'rgba(20,24,27,0.85)';
+    ctx.strokeStyle = 'rgba(12,18,23,0.8)';
     ctx.lineJoin = 'round';
     ctx.strokeText(s, x, y);
     ctx.fillStyle = color;
     ctx.fillText(s, x, y);
+  }
+
+  /** A dark frosted pill with text, optionally led by a coloured dot. */
+  private pill(s: string, x: number, y: number, size: number, weight: number, px: (n: number) => number, dot?: string): void {
+    const ctx = this.ctx;
+    ctx.font = `${weight} ${px(size)}px system-ui, sans-serif`;
+    const dotW = dot ? px(size * 0.9) : 0;
+    const w = ctx.measureText(s).width + px(size * 1.3) + dotW;
+    const h = px(size * 1.9);
+    ctx.fillStyle = 'rgba(12,18,23,0.62)';
+    roundRect(ctx, x - w / 2, y - h / 2, w, h, h / 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.lineWidth = px(1);
+    ctx.stroke();
+    if (dot) {
+      ctx.fillStyle = dot;
+      ctx.beginPath();
+      ctx.arc(x - w / 2 + px(size * 0.65) + dotW * 0.2, y, px(size * 0.32), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = THEME.label;
+    ctx.fillText(s, x + dotW / 2, y + px(0.5));
   }
 
   private drawLabels(world: World, px: (n: number) => number, z: number): void {
@@ -813,15 +1136,15 @@ export class Renderer {
       if (!this.visible(t.center, 1200)) continue;
       // Above the town, so stations at its centre stay visible.
       const top = t.center.y - townRadius(t.pop) * 0.85;
-      this.text(t.name, t.center.x, top - px(9), 16, 800, px);
-      this.text(`${t.pop.toLocaleString('en-US')}`, t.center.x, top + px(9), 11.5, 600, px, '#dfe6d6');
+      this.pill(t.name, t.center.x, top - px(10), 15, 800, px);
+      this.text(`${t.pop.toLocaleString('en-US')}`, t.center.x, top + px(12), 11, 700, px, THEME.labelMuted);
     }
     if (z >= 0.14) {
       for (const ind of world.industries) {
         if (!this.visible(ind.pos, 300)) continue;
         const out = ind.accepts ? ind.receivedLast : ind.rate;
-        this.text(ind.name, ind.pos.x, ind.pos.y - px(30) - 60, 12.5, 700, px);
-        this.text(`${CARGO_LABEL[ind.produces]} ${Math.round(out)}/mo`, ind.pos.x, ind.pos.y - px(15) - 60, 11, 600, px, THEME.cargo[ind.produces]);
+        this.pill(ind.name, ind.pos.x, ind.pos.y - px(32) - 60, 12, 700, px, THEME.cargo[ind.produces]);
+        this.text(`${CARGO_LABEL[ind.produces]} ${Math.round(out)}/mo`, ind.pos.x, ind.pos.y - px(13) - 60, 11, 700, px, THEME.cargo[ind.produces]);
       }
     }
     for (const s of world.stops) {
@@ -907,16 +1230,26 @@ function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
     paint(c);
     return ctx.createPattern(cv, 'repeat')!;
   };
-  const grass = tile(160, (c) => {
+  const grass = tile(256, (c) => {
     c.fillStyle = THEME.grass;
-    c.fillRect(0, 0, 160, 160);
-    for (let i = 0; i < 70; i++) {
-      c.fillStyle = rnd() < 0.5 ? 'rgba(80,110,50,0.10)' : 'rgba(255,255,220,0.08)';
-      const r = 6 + rnd() * 18;
-      c.beginPath();
-      c.arc(rnd() * 160, rnd() * 160, r, 0, Math.PI * 2);
-      c.fill();
-    }
+    c.fillRect(0, 0, 256, 256);
+    // Large soft patches, then fine speckle; each blob is drawn wrapped so the tile repeats seamlessly.
+    const blob = (x: number, y: number, r: number, color: string, soft: boolean) => {
+      for (const [dx, dy] of [[0, 0], [256, 0], [-256, 0], [0, 256], [0, -256], [256, 256], [-256, -256], [256, -256], [-256, 256]]) {
+        if (soft) {
+          // Patches fade out at the edge, so they read as texture rather than spots.
+          const g = c.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
+          g.addColorStop(0, color);
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          c.fillStyle = g;
+        } else c.fillStyle = color;
+        c.beginPath();
+        c.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+        c.fill();
+      }
+    };
+    for (let i = 0; i < 18; i++) blob(rnd() * 256, rnd() * 256, 40 + rnd() * 60, rnd() < 0.5 ? THEME.grassDark : THEME.grassLight, true);
+    for (let i = 0; i < 220; i++) blob(rnd() * 256, rnd() * 256, 0.8 + rnd() * 1.6, rnd() < 0.5 ? 'rgba(60,95,40,0.14)' : 'rgba(255,255,220,0.12)', false);
   });
   const forest = tile(96, (c) => {
     c.fillStyle = THEME.forest;
@@ -940,13 +1273,9 @@ function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
   const hill = tile(64, (c) => {
     c.fillStyle = THEME.hill;
     c.fillRect(0, 0, 64, 64);
-    c.strokeStyle = 'rgba(90,80,40,0.16)';
-    c.lineWidth = 2;
-    for (let i = -64; i < 128; i += 16) {
-      c.beginPath();
-      c.moveTo(i, 0);
-      c.lineTo(i + 64, 64);
-      c.stroke();
+    for (let i = 0; i < 40; i++) {
+      c.fillStyle = rnd() < 0.5 ? 'rgba(110,100,50,0.12)' : 'rgba(255,255,230,0.14)';
+      c.fillRect(rnd() * 64, rnd() * 64, 2, 2);
     }
   });
   const field = [0, 1].map((k) =>
@@ -960,27 +1289,56 @@ function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
   return { grass, forest, hill, field };
 }
 
-/** Where a building stands and which way its roof ridge runs (along the street it faces). */
-function footprint(h: House): { x: number; y: number; w: number; h: number; vertical: boolean } {
+interface Footprint {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Wall height: the roof is drawn this far above the ground footprint. */
+  H: number;
+  vertical: boolean;
+}
+
+/** Where a building stands, how tall it is, and which way its roof ridge runs (along the street it faces). */
+function footprint(h: House, k = 1): Footprint {
   if (h.shop) {
-    const s = 17 + h.residents * 0.7;
-    return { x: h.pos.x - s / 2, y: h.pos.y - s / 2, w: s, h: s, vertical: false };
+    const s = (17 + h.residents * 0.7) * k;
+    return { x: h.pos.x - s / 2, y: h.pos.y - s / 2, w: s, h: s, H: (7 + h.residents * 0.45) * k, vertical: false };
   }
-  const s = 13 + h.residents * 1.15;
+  const s = (13 + h.residents * 1.15) * k;
   const m = ((Math.round(h.pos.x / CONFIG.lot) % CONFIG.streetEvery) + CONFIG.streetEvery) % CONFIG.streetEvery;
   const vertical = m === 1 || m === CONFIG.streetEvery - 1;
   const w = vertical ? s * 0.78 : s;
   const hh = vertical ? s : s * 0.78;
-  return { x: h.pos.x - w / 2, y: h.pos.y - hh / 2, w, h: hh, vertical };
+  return { x: h.pos.x - w / 2, y: h.pos.y - hh / 2, w, h: hh, H: (3 + h.residents * 0.3) * k, vertical };
 }
 
-/** Draw buildings in a few batched passes: shadows, sunlit and shaded roof halves, flat roofs. */
-function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: number): void {
-  const fps = houses.map(footprint);
+/**
+ * Draw buildings in a few batched passes: long shadows, south walls, sunlit and
+ * shaded roof halves, flat roofs. `scale` shrinks buildings that are still going up.
+ */
+function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: number, scale?: (h: House) => number): void {
+  const fps = houses.map((h) => footprint(h, scale ? scale(h) : 1));
   if (z > 0.22) {
     ctx.fillStyle = THEME.shadow;
     ctx.beginPath();
-    for (const f of fps) ctx.rect(f.x + 2.5, f.y + 3, f.w, f.h);
+    for (const f of fps) {
+      const L = f.H * 1.4 + 2;
+      ctx.rect(f.x + SUN.x * L, f.y + SUN.y * L, f.w, f.h);
+    }
+    ctx.fill();
+  }
+  for (const [shop, color] of [
+    [false, THEME.wall],
+    [true, THEME.wallShade],
+  ] as const) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    houses.forEach((h, i) => {
+      if (h.shop !== shop) return;
+      const f = fps[i];
+      ctx.rect(f.x, f.y + f.h - f.H, f.w, f.H);
+    });
     ctx.fill();
   }
   for (let c = 0; c < THEME.roofs.length; c++) {
@@ -990,8 +1348,9 @@ function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: numbe
       houses.forEach((h, i) => {
         if (h.shop || h.roof !== c) return;
         const f = fps[i];
-        if (f.vertical) ctx.rect(shade ? f.x + f.w / 2 : f.x, f.y, f.w / 2, f.h);
-        else ctx.rect(f.x, shade ? f.y + f.h / 2 : f.y, f.w, f.h / 2);
+        const y = f.y - f.H;
+        if (f.vertical) ctx.rect(shade ? f.x + f.w / 2 : f.x, y, f.w / 2, f.h);
+        else ctx.rect(f.x, shade ? y + f.h / 2 : y, f.w, f.h / 2);
       });
       ctx.fill();
     }
@@ -1000,7 +1359,7 @@ function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: numbe
     houses.forEach((h, i) => {
       if (!h.shop || h.roof !== c) return;
       const f = fps[i];
-      ctx.rect(f.x, f.y, f.w, f.h);
+      ctx.rect(f.x, f.y - f.H, f.w, f.h);
     });
     ctx.fill();
   }
@@ -1013,14 +1372,14 @@ function paintBuildings(ctx: CanvasRenderingContext2D, houses: House[], z: numbe
     houses.forEach((h, i) => {
       if (!h.shop) return;
       const f = fps[i];
-      ctx.rect(f.x + 2.5, f.y + 2.5, f.w - 5, f.h - 5);
+      ctx.rect(f.x + 2.5, f.y - f.H + 2.5, f.w - 5, f.h - 5);
     });
     ctx.stroke();
     ctx.beginPath();
     houses.forEach((h, i) => {
       if (!h.shop) return;
       const f = fps[i];
-      ctx.rect(f.x + f.w * 0.55, f.y + f.h * 0.2, 4, 4);
+      ctx.rect(f.x + f.w * 0.55, f.y - f.H + f.h * 0.2, 4, 4);
     });
     ctx.fill();
   }
@@ -1052,6 +1411,60 @@ function scatterTrees(world: World): { x: number; y: number; r: number }[] {
     for (let k = 0; k < n; k++) {
       const p = v(c.x + (rnd() - 0.5) * 100, c.y + (rnd() - 0.5) * 100);
       if (open(p)) out.push({ x: p.x, y: p.y, r: 9 + rnd() * 7 });
+    }
+  }
+  return out;
+}
+
+/** Hill contour rings: the outline shrunk toward its centre in steps, drifting toward the sun. */
+const ringCache = new WeakMap<Polygon, Polygon[]>();
+function shrinkRings(poly: Polygon): Polygon[] {
+  let rings = ringCache.get(poly);
+  if (!rings) {
+    const c = poly.reduce((a, p) => v(a.x + p.x / poly.length, a.y + p.y / poly.length), v(0, 0));
+    rings = [0.72, 0.48, 0.26].map((k, i) => poly.map((p) => v(c.x + (p.x - c.x) * k - SUN.x * 30 * (i + 1), c.y + (p.y - c.y) * k - SUN.y * 30 * (i + 1))));
+    ringCache.set(poly, rings);
+  }
+  return rings;
+}
+
+/** Lighten (k > 0) or darken (k < 0) a #rrggbb colour. */
+const shadeCache = new Map<string, string>();
+function shade(hex: string, k: number): string {
+  const key = hex + k;
+  let out = shadeCache.get(key);
+  if (!out) {
+    const n = parseInt(hex.slice(1), 16);
+    const ch = (c: number) => Math.round(k < 0 ? c * (1 + k) : c + (255 - c) * k);
+    out = `rgb(${ch(n >> 16)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
+    shadeCache.set(key, out);
+  }
+  return out;
+}
+
+/** 0 to 1 with a small overshoot at the end, for things that spring into place. */
+export function easeOutBack(t: number): number {
+  const c = 1.7;
+  return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2;
+}
+
+/** Points spread over the water where light glints. */
+function scatterGlints(water: Polygon[]): { x: number; y: number; phase: number }[] {
+  let seed = 4242;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const out: { x: number; y: number; phase: number }[] = [];
+  for (const w of water) {
+    const xs = w.map((p) => p.x);
+    const ys = w.map((p) => p.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    for (let x = x0; x < x1; x += 70) {
+      for (let y = y0; y < y1; y += 70) {
+        const p = v(x + rnd() * 60, y + rnd() * 60);
+        if (rnd() < 0.5 && pointInPolygon(p, w)) out.push({ x: p.x, y: p.y, phase: rnd() * Math.PI * 2 });
+      }
     }
   }
   return out;

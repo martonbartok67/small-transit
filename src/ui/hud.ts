@@ -3,25 +3,34 @@ import { Economy } from '../sim/economy';
 import type { Carries, Freight, Ledger, Line, Mode, Vehicle, VehicleType } from '../sim/types';
 import { loadOf } from '../sim/vehicles';
 import { money, type World } from '../sim/world';
-import { THEME, type Layer } from '../render/renderer';
+import type { Layer } from '../render/renderer';
+import { THEME } from '../render/theme';
 import type { Tool } from './editor';
 
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const COARSE = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
 
 const ICON = {
-  pause: '<svg viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height="12"/><rect x="9.5" y="2" width="3.5" height="12"/></svg>',
-  play: '<svg viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>',
-  fast: '<svg viewBox="0 0 16 16"><path d="M1 3l7 5-7 5zM8 3l7 5-7 5z"/></svg>',
-  faster: '<svg viewBox="0 0 16 16"><path d="M0 4l5 4-5 4zM5.5 4l5 4-5 4zM11 4l5 4-5 4z"/></svg>',
-  layers: '<svg viewBox="0 0 16 16"><path d="M8 1.5L15 5 8 8.5 1 5z"/><path d="M2.6 7.6L8 10.3l5.4-2.7L15 8.4 8 11.9 1 8.4z"/><path d="M2.6 10.9L8 13.6l5.4-2.7L15 11.7 8 15.2 1 11.7z" opacity=".75"/></svg>',
-  select: '<svg viewBox="0 0 24 24"><path d="M6 3l12 9-5.2 1.1 3 6.4-2.6 1.2-3-6.4L6 18z" fill="currentColor"/></svg>',
-  rail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3L6 21M16 3l2 18"/><path d="M6.5 7h11M6 12h12M5.5 17h13" stroke-width="1.8"/></svg>',
-  road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 3L4 21M17 3l3 18"/><path d="M12 4v3M12 10.5v3M12 17v3"/></svg>',
-  bulldoze: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg>',
-  lines: '<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
-  menu: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>',
-  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14" stroke-width="3"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></svg>',
+  fast: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6v12l8-6zM12 6v12l8-6z" fill="currentColor"/></svg>',
+  faster: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 7v10l6-5zM8.5 7v10l6-5zM15.5 7v10l6-5z" fill="currentColor"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 4.5-9 4.5-9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5L12 21l9-4.5"/></svg>',
+  select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9.5-6 1.4 3.4 6.6-2.7 1.4-3.4-6.6L6 19.5z" fill="currentColor" stroke-width="1.2"/></svg>',
+  rail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="13" rx="3"/><path d="M6 10h12M9 13.2h.01M15 13.2h.01M8 20l2-4M16 20l-2-4"/></svg>',
+  road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="12" rx="3"/><path d="M4 10h16M7.5 16v3M16.5 16v3M8 13h.01M16 13h.01"/></svg>',
+  bulldoze: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5"/></svg>',
+  lines: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v6"/><path d="M5 8v4a6 6 0 0 0 6 6h6" opacity=".55"/></svg>',
+  menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg>',
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7" stroke-width="2.6"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18" stroke-width="2.4"/></svg>',
+  finance: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-4 3 3 5-6"/></svg>',
+  vehicles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="10" rx="3"/><path d="M3 11h18M7 19.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM17 19.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/></svg>',
+  towns: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18M5 20V10l5-4 5 4v10M15 20v-7h4v7M9 20v-4h2v4"/></svg>',
+  industries: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20V11l5 3v-3l5 3V6h3v14zM3 20h18"/><path d="M18 20V9h3v11"/></svg>',
+  news: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
+  help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.8M12 17h.01"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.7 1.8 1.8.7-1.8.7L19 21l-.7-1.8-1.8-.7 1.8-.7z"/></svg>',
 };
 
 const TOOLS: { tool: Tool; label: string; icon: string }[] = [
@@ -92,6 +101,7 @@ export interface HudCallbacks {
   sheetChanged(sheet: Sheet | null): void;
   focus(target: { stop?: number; line?: number; town?: number; industry?: number }): void;
   follow(vehicleId: number): void;
+  setGraphics(high: boolean): void;
 }
 
 export interface HudState {
@@ -102,6 +112,8 @@ export interface HudState {
   started: boolean;
   /** A saved company exists that the title screen can continue. */
   saved: boolean;
+  /** High graphics: ambient motion, smoke, glow and blurred panels. */
+  graphics: boolean;
 }
 
 /** A rendered sheet: structure (rebuilt only when `key` changes) plus live values patched in place. */
@@ -146,13 +158,19 @@ export class Hud {
   private lastRefresh = 0;
   private dirty = true;
   private world!: World;
+  private graphics = true;
+  /** Cash as shown: eases toward the real figure. */
+  private shownCash: number | null = null;
+  private lastFrame = 0;
+  private leaveTimer = 0;
+  private overlayKind = '';
 
   constructor(
     root: HTMLElement,
     private cb: HudCallbacks,
   ) {
     root.innerHTML =
-      '<div class="top"></div><div class="pop-slot"></div><div class="sheet-slot"></div><div class="bar"></div><div class="overlay-slot"></div><div class="toast" style="opacity:0"></div>';
+      '<div class="top"></div><div class="pop-slot"></div><div class="sheet-slot"></div><div class="bar"></div><div class="overlay-slot"></div><div class="toast"></div>';
     this.top = root.querySelector('.top')!;
     this.bar = root.querySelector('.bar')!;
     this.sheetEl = root.querySelector('.sheet-slot')!;
@@ -187,11 +205,20 @@ export class Hud {
     return { top: this.top.getBoundingClientRect().bottom + 6, bottom: window.innerHeight - this.bar.getBoundingClientRect().top + 6 };
   }
 
-  toast(msg: string, ms = 2200): void {
+  toast(msg: string, ms = 2200, tone: 'info' | 'bad' = 'info'): void {
     this.toastEl.textContent = msg;
-    this.toastEl.style.opacity = '1';
+    this.toastEl.className = `toast show ${tone}`;
     clearTimeout(this.toastTimer);
-    this.toastTimer = window.setTimeout(() => (this.toastEl.style.opacity = '0'), ms);
+    this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('show'), ms);
+  }
+
+  /** A brief green or red flash on the cash pill, at month end. */
+  flashCash(good: boolean): void {
+    const el = this.top.querySelector('.cash');
+    if (!el) return;
+    el.classList.remove('flash-good', 'flash-bad');
+    void (el as HTMLElement).offsetWidth; // restart the animation
+    el.classList.add(good ? 'flash-good' : 'flash-bad');
   }
 
   get helpOpen(): boolean {
@@ -249,6 +276,8 @@ export class Hud {
     switch (act) {
       case 'speed':
         return this.cb.setSpeed(n);
+      case 'gfx':
+        return this.cb.setGraphics(!this.graphics);
       case 'tool':
         this.layersOpen = false;
         return this.cb.setTool(arg as Tool);
@@ -389,31 +418,46 @@ export class Hud {
     const w = (this.world = s.world);
     const { year, month } = w.date();
     const cash = w.econ.cash;
-    this.set(this.top, 'top', [s.speed, s.layer].join('|'), () => {
-      const btn = (act: string, icon: string, on: boolean, label: string) =>
-        `<button class="icon-btn${on ? ' on' : ''}" data-act="${act}" aria-label="${label}">${icon}</button>`;
+    this.graphics = s.graphics;
+    const dt = this.lastFrame ? Math.min(0.1, (now - this.lastFrame) / 1000) : 0;
+    this.lastFrame = now;
+    // Cash rolls toward its new value instead of jumping.
+    if (this.shownCash === null || !s.started || Math.abs(cash - this.shownCash) < 500) this.shownCash = cash;
+    else this.shownCash += (cash - this.shownCash) * Math.min(1, dt * 6);
+    // Bars are built once; only their state classes change, so the sliding indicators can animate.
+    this.set(this.top, 'top', 'static', () => {
+      const btn = (act: string, icon: string, label: string) => `<button class="icon-btn" data-act="${act}" aria-label="${label}">${icon}</button>`;
       return `
         <button class="cash" data-act="finance" aria-label="Finance"><b data-live="cash">${money(cash)}</b><small data-live="date">${MONTHS[month]} ${year}</small></button>
         <div class="clock">
-          ${btn('speed:0', ICON.pause, s.speed === 0, 'Pause')}
-          ${btn('speed:1', ICON.play, s.speed === 1, 'Play')}
-          ${btn('speed:2', ICON.fast, s.speed === 2, 'Fast')}
-          ${btn('speed:4', ICON.faster, s.speed === 4, 'Fastest')}
-          ${btn('layers', ICON.layers, s.layer !== 'lines', 'Map layers')}
+          <div class="speed"><i class="thumb"></i>
+            ${btn('speed:0', ICON.pause, 'Pause')}${btn('speed:1', ICON.play, 'Play')}${btn('speed:2', ICON.fast, 'Fast')}${btn('speed:4', ICON.faster, 'Fastest')}
+          </div>
+          ${btn('layers', ICON.layers, 'Map layers')}
         </div>`;
     });
-    this.patch(this.top, { cash: { text: money(cash), bad: cash < 0 }, date: { text: `${MONTHS[month]} ${year}` } });
+    const speedIdx = [0, 1, 2, 4].indexOf(s.speed);
+    const sp = this.top.querySelector<HTMLElement>('.speed')!;
+    if (sp.style.getPropertyValue('--i') !== String(speedIdx)) sp.style.setProperty('--i', String(speedIdx));
+    sp.classList.toggle('paused', s.speed === 0);
+    this.top.querySelectorAll<HTMLElement>('.speed .icon-btn').forEach((b, i) => b.classList.toggle('on', i === speedIdx));
+    this.top.querySelector('[data-act="layers"]')!.classList.toggle('on', s.layer !== 'lines' || this.layersOpen);
+    this.patch(this.top, { cash: { text: money(this.shownCash), bad: cash < 0 }, date: { text: `${MONTHS[month]} ${year}` } });
 
-    this.set(this.bar, 'bar', [s.tool, this.sheet?.kind].join('|'), () => {
-      const tools = TOOLS.map(
-        (t) => `<button class="tool${s.tool === t.tool ? ' on' : ''}" data-act="tool:${t.tool}">${t.icon}<span>${t.label}</span></button>`,
-      ).join('');
-      const k = this.sheet?.kind;
-      const inLines = k === 'lines' || k === 'line' || k === 'buy';
-      return `${tools}<span class="sep"></span>
-        <button class="tool${inLines ? ' on' : ''}" data-act="lines">${ICON.lines}<span>Lines</span></button>
-        <button class="tool${!inLines && k ? ' on' : ''}" data-act="menu">${ICON.menu}<span>Menu</span></button>`;
+    this.set(this.bar, 'bar', 'static', () => {
+      const tools = TOOLS.map((t) => `<button class="tool" data-act="tool:${t.tool}">${t.icon}<span>${t.label}</span></button>`).join('');
+      return `<div class="tools"><i class="thumb"></i>${tools}</div><span class="sep"></span>
+        <button class="tool" data-act="lines">${ICON.lines}<span>Lines</span></button>
+        <button class="tool" data-act="menu">${ICON.menu}<span>Menu</span></button>`;
     });
+    const toolIdx = TOOLS.findIndex((t) => t.tool === s.tool);
+    const tl = this.bar.querySelector<HTMLElement>('.tools')!;
+    if (tl.style.getPropertyValue('--i') !== String(toolIdx)) tl.style.setProperty('--i', String(toolIdx));
+    tl.querySelectorAll<HTMLElement>('.tool').forEach((b, i) => b.classList.toggle('on', i === toolIdx));
+    const k = this.sheet?.kind;
+    const inLines = k === 'lines' || k === 'line' || k === 'buy';
+    this.bar.querySelector('[data-act="lines"]')!.classList.toggle('on', inLines);
+    this.bar.querySelector('[data-act="menu"]')!.classList.toggle('on', !inLines && !!k);
 
     this.set(this.popEl, 'pop', `${this.layersOpen}|${s.layer}`, () =>
       this.layersOpen
@@ -445,9 +489,23 @@ export class Hud {
       const body = this.sheetEl.querySelector('.sheet-body');
       const sameSheet = this.keys.get('sheet-id') === (sh ? sheetId(sh) : '');
       const scroll = sameSheet && body ? body.scrollTop : 0;
+      const depth = Number(this.keys.get('sheet-depth') ?? 0);
       this.keys.set('sheet', key);
       this.keys.set('sheet-id', sh ? sheetId(sh) : '');
-      this.sheetEl.innerHTML = view ? this.frame(view) : '';
+      this.keys.set('sheet-depth', String(this.stack.length));
+      clearTimeout(this.leaveTimer);
+      if (!view) {
+        // Slide the old sheet out before removing it.
+        const old = this.sheetEl.querySelector('.sheet');
+        if (old) {
+          old.classList.add('leave');
+          this.leaveTimer = window.setTimeout(() => (this.sheetEl.innerHTML = ''), 200);
+        }
+      } else {
+        // A new sheet springs up; moving through the back stack slides sideways; a refresh does not move.
+        const motion = sameSheet ? '' : !depth || !this.sheetEl.querySelector('.sheet:not(.leave)') ? ' enter' : this.stack.length > depth ? ' enter-fwd' : this.stack.length < depth ? ' enter-back' : ' enter-swap';
+        this.sheetEl.innerHTML = this.frame(view, motion);
+      }
       const fresh = this.sheetEl.querySelector('.sheet-body');
       if (fresh) fresh.scrollTop = scroll;
     }
@@ -455,11 +513,12 @@ export class Hud {
     if (view) this.patch(this.sheetEl, view.live);
   }
 
-  private frame(v: View): string {
+  private frame(v: View, motion = ''): string {
     const back = this.stack.length > 1 ? `<button class="close" data-act="back" aria-label="Back">${ICON.back}</button>` : '';
-    return `<div class="sheet" role="dialog">
+    return `<div class="sheet${motion}" role="dialog">
+      <div class="grip"></div>
       <div class="sheet-head">${back}<div class="grow"><h2>${v.title}</h2><p>${v.sub}</p></div>
-      <button class="close" data-act="close" aria-label="Close">✕</button></div>
+      <button class="close" data-act="close" aria-label="Close">${ICON.close}</button></div>
       <div class="sheet-body">${v.body}</div>
     </div>`;
   }
@@ -499,21 +558,25 @@ export class Hud {
 
   private menuView(w: World): View {
     const lossy = w.lines.filter((l) => l.profitLast < 0).length;
-    const tile = (go: string, title: string, sub: string) =>
-      `<button class="tile" data-act="${go}"><b>${title}</b><small>${sub}</small></button>`;
+    const tile = (go: string, title: string, sub: string, icon: string) =>
+      `<button class="tile" data-act="${go}"><span class="tile-icon">${icon}</span><b>${title}</b><small>${sub}</small></button>`;
     return {
-      key: `menu|${w.lines.length}|${w.vehicles.length}|${w.news.length}|${lossy}`,
+      key: `menu|${w.lines.length}|${w.vehicles.length}|${w.news.length}|${lossy}|${this.graphics}`,
       title: 'Menu',
       sub: 'Your company at a glance',
       body: `<div class="tiles">
-        ${tile('go:finance', 'Finance', `Value ${money(w.companyValue())}`)}
-        ${tile('go:lines', 'Lines', `${plural(w.lines.length, 'line')}${lossy ? ` · ${lossy} losing money` : ''}`)}
-        ${tile('go:vehicles', 'Vehicles', plural(w.vehicles.length, 'vehicle'))}
-        ${tile('go:towns', 'Towns', `${round(w.towns.reduce((n, t) => n + t.pop, 0))} people`)}
-        ${tile('go:industries', 'Industries', `${w.industries.length} sites`)}
-        ${tile('go:news', 'News', w.news.length ? w.news[w.news.length - 1].text : 'Nothing yet')}
-        ${tile('help', 'How to play', 'Six short pages')}
-      </div>`,
+        ${tile('go:finance', 'Finance', `Value ${money(w.companyValue())}`, ICON.finance)}
+        ${tile('go:lines', 'Lines', `${plural(w.lines.length, 'line')}${lossy ? ` · ${lossy} losing money` : ''}`, ICON.lines)}
+        ${tile('go:vehicles', 'Vehicles', plural(w.vehicles.length, 'vehicle'), ICON.vehicles)}
+        ${tile('go:towns', 'Towns', `${round(w.towns.reduce((n, t) => n + t.pop, 0))} people`, ICON.towns)}
+        ${tile('go:industries', 'Industries', `${w.industries.length} sites`, ICON.industries)}
+        ${tile('go:news', 'News', w.news.length ? w.news[w.news.length - 1].text : 'Nothing yet', ICON.news)}
+        ${tile('help', 'How to play', 'Six short pages', ICON.help)}
+      </div>
+      <h3>Settings</h3>
+      <button class="switch${this.graphics ? ' on' : ''}" data-act="gfx" role="switch" aria-checked="${this.graphics}">
+        <span class="grow">High graphics<small>Smoke, clouds, glints, glow and frosted panels. Turn off on slower phones.</small></span><i></i>
+      </button>`,
       live: {},
     };
   }
@@ -892,11 +955,17 @@ export class Hud {
     if (this.help !== null) key = `help:${this.help}`;
     else if (!s.started) key = `start:${s.saved}`;
     else if (w.over) key = `over:${Math.round(w.delivered)}`;
+    const kind = key.split(':')[0];
+    // The backdrop fades in only when an overlay first appears, not on each help page.
+    const enter = kind !== this.overlayKind ? ' enter' : '';
     this.set(this.overlay, 'overlay', key, () => {
-      if (this.help !== null) return this.helpCard();
+      this.overlayKind = kind;
+      if (this.help !== null) return this.helpCard(enter);
       if (!s.started)
-        return `<div class="overlay"><div class="card">
-          <h1>Small Transit</h1>
+        return `<div class="overlay title${enter}"><div class="card">
+          <div class="logo" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h1>Small <span>Transit</span></h1>
+          <div class="tagline">Rail · Road · 1950 to 1990</div>
           <p>Run a transport company in a river valley. Carry passengers between six towns and freight from farms, forests and an oil well, and stay in the black.</p>
           <div class="actions">${
             s.saved
@@ -907,7 +976,7 @@ export class Hud {
         </div></div>`;
       if (w.over) {
         const { year, month } = w.date();
-        return `<div class="overlay"><div class="card">
+        return `<div class="overlay${enter}"><div class="card bankrupt">
           <h2>Bankrupt</h2>
           <p>Your company closed in ${MONTHS[month]} ${year} after carrying ${round(w.delivered)} passengers and ${round(w.deliveredCargo)} cargo.</p>
           <div class="actions"><button class="primary" data-act="start">Start again</button></div>
@@ -917,16 +986,18 @@ export class Hud {
     });
   }
 
-  private helpCard(): string {
+  private helpCard(enter: string): string {
     const page = this.help!;
     const h = HELP[page];
     const last = page === HELP.length - 1;
     const dots = HELP.map((_, i) => `<button class="dot-btn${i === page ? ' on' : ''}" data-act="help-go:${i}" aria-label="Page ${i + 1}"></button>`).join('');
-    return `<div class="overlay"><div class="card help" role="dialog" aria-label="How to play">
-      <button class="close" data-act="help-close" aria-label="Close">✕</button>
-      <div class="step">${page + 1} of ${HELP.length}</div>
-      <h2>${h.title}</h2>
-      <p>${h.text}</p>
+    return `<div class="overlay${enter}"><div class="card help" role="dialog" aria-label="How to play">
+      <button class="close" data-act="help-close" aria-label="Close">${ICON.close}</button>
+      <div class="help-page">
+        <div class="step">${page + 1} of ${HELP.length}</div>
+        <h2>${h.title}</h2>
+        <p>${h.text}</p>
+      </div>
       <div class="help-nav">
         <button class="ghost" data-act="help-go:${page - 1}" ${page === 0 ? 'disabled' : ''}>Back</button>
         <div class="dots">${dots}</div>

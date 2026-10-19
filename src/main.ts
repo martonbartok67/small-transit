@@ -51,6 +51,15 @@ const storage = {
 let saved = storage.get(SAVE_KEY) !== null;
 const savedLayer = storage.get('st-layer') as Layer | null;
 let layer: Layer = LAYERS.some((l) => l.layer === savedLayer) ? savedLayer! : 'lines';
+let graphics = storage.get('st-gfx') !== 'low';
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+/** Ambient motion and effects run only on high graphics and when the player has not asked for less motion. */
+function applyGraphics(): void {
+  renderer.motion = graphics && !reducedMotion.matches;
+  document.documentElement.classList.toggle('low-gfx', !graphics);
+}
+applyGraphics();
+reducedMotion.addEventListener?.('change', applyGraphics);
 /** Vehicle the camera follows, or -1. */
 let follow = -1;
 let saveWarned = false;
@@ -77,6 +86,7 @@ const editor = new Editor(() => world, cam, {
   tapEmpty: () => hud.openSheet(null),
   lineCreated: (l) => {
     hud.openSheet({ kind: 'line', id: l.id });
+    renderer.lineBuilt(l.segs.map((seg) => seg.path));
     hud.toast(`${l.name} built. Buy ${l.mode === 'rail' ? 'a train or a freight train' : 'a bus or a truck'} to start service.`, 3500);
     navigator.vibrate?.(8);
   },
@@ -90,6 +100,11 @@ const hud = new Hud(document.getElementById('hud')!, {
     storage.set('st-layer', l);
   },
   follow: (id) => (follow = id),
+  setGraphics: (high) => {
+    graphics = high;
+    storage.set('st-gfx', high ? 'high' : 'low');
+    applyGraphics();
+  },
   setTool: (t) => {
     editor.tool = editor.tool === t && t !== 'select' ? 'select' : t;
     if (editor.tool === 'rail' || editor.tool === 'road') {
@@ -270,11 +285,16 @@ function frame(now: number) {
   }
   for (const ev of world.events) {
     if (ev.type === 'warning') {
-      hud.toast(ev.text, 5000);
+      hud.toast(ev.text, 5000, 'bad');
       navigator.vibrate?.([30, 80, 30]);
     } else if (ev.type === 'monthEnd') {
-      if (Economy.net(world.econ.last) > 0) audio.weekEnd();
+      const net = Economy.net(world.econ.last);
+      if (net > 0) audio.weekEnd();
+      hud.flashCash(net >= 0);
       persist();
+    } else if (ev.type === 'deliver') {
+      const st = world.stopById(ev.stop);
+      if (st) renderer.fx.income(st.id, st.pos, ev.amount);
     } else if (ev.type === 'news') {
       hud.toast(ev.news.text, 3000);
     } else if (ev.type === 'bankrupt') {
@@ -285,7 +305,9 @@ function frame(now: number) {
     }
   }
   world.events.length = 0;
-  hud.update({ world, speed, tool: editor.tool, layer, started, saved }, now);
+  hud.update({ world, speed, tool: editor.tool, layer, started, saved, graphics }, now);
+  // Behind the title screen the valley drifts slowly past.
+  if (!started && renderer.motion) cam.lookAt(v(Math.sin(now / 26000) * 1400 - 400, Math.cos(now / 33000) * 500), Math.max(cam.minZoom, cam.viewport.w / 2200));
   if (follow >= 0) {
     const v = world.vehicles.find((x) => x.id === follow);
     if (v) cam.lookAt(vehiclePose(v).p);
