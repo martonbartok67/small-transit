@@ -1,6 +1,12 @@
 import type { Polygon, Vec2 } from './geom';
 
-export type Mode = 'rail' | 'bus';
+export type Mode = 'rail' | 'road';
+export type Cargo = 'grain' | 'logs' | 'food' | 'goods';
+/** What a group of travellers is: passengers or one kind of cargo. */
+export type Freight = 'pax' | Cargo;
+/** What a vehicle carries; passengers and cargo route on separate graphs. */
+export type Carries = 'pax' | 'cargo';
+export type IndustryKind = 'farm' | 'forest' | 'foodplant' | 'sawmill';
 
 export interface District {
   id: number;
@@ -18,6 +24,8 @@ export interface House {
   district: number;
   /** Stop whose catchment serves this house (nearest covering stop), or -1. */
   stop: number;
+  /** Roof colour index, for drawing. */
+  roof: number;
 }
 
 export interface Town {
@@ -25,36 +33,52 @@ export interface Town {
   name: string;
   center: Vec2;
   pop: number;
-  /** Passengers starting or ending here this month and last month, for growth and the town sheet. */
+  /** Starting population; growth slows as the town approaches CONFIG.growth.capFactor times this. */
+  basePop: number;
+  /** Passengers boarding or arriving in this town, this month and last. */
   tripsMonth: number;
   tripsLast: number;
+  /** Food and goods delivered to the town, this month and last. */
+  supplyMonth: number;
+  supplyLast: number;
   growthLast: number;
 }
 
-export interface Passenger {
+export interface Industry {
   id: number;
-  dest: number; // district id
-  origin: number; // stop id
-  spawnedAt: number;
-  /** Distance ridden per line, so fares can be split between lines. */
-  rides: [line: number, dist: number][];
-  boardOdo: number;
-  walked: boolean;
+  kind: IndustryKind;
+  name: string;
+  pos: Vec2;
+  produces: Cargo;
+  accepts: Cargo | null;
+  /** Primary industries: output per month. Secondary industries turn last month's input into output. */
+  rate: number;
+  producedMonth: number;
+  producedLast: number;
+  /** Cargo picked up by vehicles at a stop serving this industry. */
+  shippedMonth: number;
+  shippedLast: number;
+  receivedMonth: number;
+  receivedLast: number;
 }
+
+/** Travellers waiting at a stop, keyed `${freight}|${destStopId}`; counts are fractional. */
+export type Waiting = Record<string, number>;
 
 export interface Stop {
   id: number;
   mode: Mode;
   pos: Vec2;
   name: string;
-  waiting: Passenger[];
+  waiting: Waiting;
   /** Districts whose residents this stop reaches (any house in the catchment). */
   covers: Set<number>;
   /** Residents assigned to this stop (houses for which it is the nearest covering stop). */
   residents: number;
-  /** Residents per district assigned to this stop, for demand generation. */
-  byDistrict: Map<number, number>;
-  spawnAcc: number;
+  /** Town this stop sits in, or -1 in the countryside. */
+  town: number;
+  /** Industries close enough to ship or receive through this stop. */
+  industries: number[];
   bornAt: number;
 }
 
@@ -78,23 +102,38 @@ export interface Line {
   profitLast: number;
   carriedMonth: number;
   carriedLast: number;
+  /** When a vehicle of each kind last left the first stop, for spacing them out. */
+  departed: Record<Carries, number>;
 }
 
+export type VehicleKey = 'train' | 'freight' | 'bus' | 'truck';
+
 export interface VehicleType {
-  key: 'train' | 'bus';
+  key: VehicleKey;
   name: string;
   mode: Mode;
+  carries: Carries;
   speed: number;
   accel: number;
   decel: number;
   capacity: number;
   price: number;
   runningPerMonth: number;
-  dwellPerPassenger: number;
+  /** Seconds per passenger or unit of cargo moved at a stop. */
+  dwellPerUnit: number;
   minDwell: number;
   /** Visual length per car and number of cars. */
   carLength: number;
   cars: number;
+}
+
+/** Travellers aboard a vehicle who boarded at `from` and leave at `alight`. */
+export interface Group {
+  what: Freight;
+  dest: number;
+  alight: number;
+  from: number;
+  n: number;
 }
 
 export interface Vehicle {
@@ -118,12 +157,13 @@ export interface Vehicle {
   dockedAt: number | null;
   stopDecided: boolean;
   stopping: boolean;
-  riders: Passenger[];
+  load: Group[];
   odo: number;
 }
 
 export interface Ledger {
   fares: number;
+  freight: number;
   running: number;
   maintenance: number;
   interest: number;
@@ -138,17 +178,27 @@ export interface TownDef {
   districts: 1 | 2 | 3;
 }
 
+export interface IndustryDef {
+  kind: IndustryKind;
+  name: string;
+  pos: Vec2;
+}
+
 export interface MapDef {
   name: string;
   halfW: number;
   halfH: number;
   water: Polygon[];
   hills: Polygon[];
+  forests: Polygon[];
+  /** Country roads that already exist; road vehicles use them for free. */
+  roads: Vec2[][];
   towns: TownDef[];
+  industries: IndustryDef[];
 }
 
 export type SimEvent =
-  | { type: 'deliver'; stop: number; fare: number; line: number }
+  | { type: 'deliver'; stop: number; amount: number; line: number }
   | { type: 'monthEnd'; month: number }
   | { type: 'warning'; text: string }
   | { type: 'bankrupt' };

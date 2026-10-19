@@ -1,5 +1,5 @@
 // Network-first: always fresh when online, last good copy when offline.
-const CACHE = 'small-transit-v1';
+const CACHE = 'small-transit-v2';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (e) => {

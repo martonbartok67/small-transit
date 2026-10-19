@@ -1,10 +1,11 @@
 import { dist, distToSegment, norm, sub, v, type Vec2 } from '../sim/geom';
-import type { Line, Mode, Stop, Vehicle } from '../sim/types';
+import { townRadius } from '../sim/towns';
+import type { Industry, Line, Mode, Stop, Town, Vehicle } from '../sim/types';
 import { vehiclePose } from '../sim/vehicles';
 import type { World } from '../sim/world';
 import type { Camera } from './camera';
 
-export type Tool = 'select' | 'rail' | 'bus' | 'bulldoze';
+export type Tool = 'select' | 'rail' | 'road' | 'bulldoze';
 
 type Drag =
   | { kind: 'pan'; last: Vec2 }
@@ -28,6 +29,8 @@ export interface EditPreview {
 export interface EditorEvents {
   tapStop(s: Stop): void;
   tapLine(l: Line): void;
+  tapIndustry(i: Industry): void;
+  tapTown(t: Town): void;
   tapEmpty(): void;
   lineCreated(l: Line): void;
   toast(msg: string): void;
@@ -269,7 +272,7 @@ export class Editor {
 
   private tap(d: Extract<Drag, { kind: 'press' }>): void {
     const w = this.world();
-    if (this.tool === 'rail' || this.tool === 'bus') {
+    if (this.tool === 'rail' || this.tool === 'road') {
       const r = w.placeStop(this.tool, this.cursor);
       if (typeof r === 'string') this.ev.toast(r);
       return;
@@ -286,7 +289,14 @@ export class Editor {
       const l = w.lineById(d.vehicle.line);
       if (l) this.ev.tapLine(l);
     } else if (d.line) this.ev.tapLine(d.line);
-    else this.ev.tapEmpty();
+    else {
+      const p = this.cursor;
+      const ind = w.industries.find((i) => dist(i.pos, p) < Math.max(150, this.r));
+      const town = w.towns.find((t) => dist(t.center, p) < townRadius(t.pop) * 0.5);
+      if (ind) this.ev.tapIndustry(ind);
+      else if (town) this.ev.tapTown(town);
+      else this.ev.tapEmpty();
+    }
   }
 
   cancel(): void {

@@ -11,7 +11,7 @@ const body = html.match(/<body>([\s\S]*)<\/body>/)[1].trim();
 writeFileSync(
   out,
   `<title>Small Transit</title>
-<meta name="description" content="Run a transport company: connect towns by rail and bus, and stay in the black." />
+<meta name="description" content="Run a transport company: carry passengers and freight by rail and road, and stay in the black." />
 <style>${css}</style>
 ${body}
 <script type="module">${js.replace(/<\/script/gi, '<\\/script')}</script>

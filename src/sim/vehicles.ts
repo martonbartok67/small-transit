@@ -1,10 +1,9 @@
-import { CONFIG } from './config';
 import { dist, pointAt, type Vec2 } from './geom';
-import { departDir, nextIdx, segIndex, type Choice } from './router';
+import { departDir, nextIdx, roundTrip, segIndex } from './router';
 import type { Line, Stop, Vehicle } from './types';
 import type { World } from './world';
 
-/* Vehicle movement, ported from Small Subway's trains and parameterised by VehicleType. */
+/* Vehicle movement along line segments; loading and unloading live in World. */
 
 export function segPath(line: Line, i: number, d: 1 | -1): { path: Vec2[]; len: number } {
   const seg = line.segs[segIndex(line, i, d)];
@@ -33,25 +32,17 @@ export function updateVehicle(w: World, t: Vehicle, dt: number): void {
   if (t.d >= t.pathLen) arrive(w, t, t.d - t.pathLen);
 }
 
+/** Stop only where someone gets off or someone waiting wants this vehicle. */
 function shouldStop(w: World, t: Vehicle): boolean {
   const line = w.lineById(t.line);
   if (t.orphan || !line) return true;
   const st = w.stopById(t.toStation)!;
-  const dep = departDir(line, t.toIdx, t.dir);
-  let leaving = 0;
-  for (const r of t.riders) if (w.router.wouldAlight(line, t.toIdx, dep, st, r.dest)) leaving++;
-  if (leaving > 0) return true;
-  if (t.riders.length >= t.type.capacity) return false;
-  const seen = new Set<string>();
-  for (const p of st.waiting) {
-    const k = `${p.dest}:${p.walked}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    const c = w.router.decide(st, p.dest, undefined, !p.walked);
-    if (c?.kind === 'board' && c.line === line.id && c.dir === dep) return true;
-  }
-  return false;
+  if (t.load.some((g) => g.alight === st.id)) return true;
+  if (loadOf(t) >= t.type.capacity - 0.5) return false;
+  return w.boardable(t, line, st, departDir(line, t.toIdx, t.dir)) >= 1;
 }
+
+export const loadOf = (t: Vehicle): number => t.load.reduce((n, g) => n + g.n, 0);
 
 function nearestOnLine(w: World, line: Line, from: Vec2): Stop {
   let best = w.stopById(line.stops[0])!;
@@ -86,19 +77,27 @@ function arrive(w: World, t: Vehicle, overshoot: number): void {
   if (t.orphan) {
     const idx = line.stops.indexOf(st.id);
     if (idx < 0) {
-      t.riders = t.riders.filter((r) => (st.covers.has(r.dest) ? (w.deliver(r, st), false) : true));
+      w.unload(t, st, (g) => g.dest === st.id);
       return rejoin(w, t, line, st, overshoot);
     }
     t.orphan = false;
     t.fromIdx = idx;
     t.dir = departDir(line, idx, t.dir);
-    return dock(t, st);
+    dock(t, st);
+    return exchange(w, t, line, st);
   }
   t.fromIdx = t.toIdx;
   t.fromStation = st.id;
   t.dir = departDir(line, t.fromIdx, t.dir);
-  if (t.stopping) return dock(t, st);
-  startSegment(t, line, overshoot);
+  if (!t.stopping) return startSegment(t, line, overshoot);
+  dock(t, st);
+  exchange(w, t, line, st);
+}
+
+/** Unload and load at a stop; the dwell grows with the number of people or cargo moved. */
+function exchange(w: World, t: Vehicle, line: Line, st: Stop): void {
+  const moved = w.unload(t, st, (g) => g.alight === st.id) + w.board(t, line, st, t.dir);
+  t.dwell = t.type.minDwell + moved * t.type.dwellPerUnit;
 }
 
 export function dock(t: Vehicle, st: Stop): void {
@@ -133,45 +132,24 @@ function updateDwell(w: World, t: Vehicle, dt: number): void {
   const st = w.stopById(t.dockedAt!)!;
   const line = w.lineById(t.line);
   if (!line) return w.retireVehicle(t, st);
-  const step = t.type.dwellPerPassenger;
-  const choices = new Map<string, Choice | null>();
-  // Several passengers can move per tick when the per-passenger time is shorter than a tick.
-  for (let guard = 0; t.dwell <= 0 && guard < 40; guard++) {
-    if (t.orphan || !dwellAction(w, t, st, choices)) {
-      t.dockedAt = null;
-      if (t.orphan) return rejoin(w, t, line, st, 0);
-      return startSegment(t, line, 0);
+  if (t.orphan) {
+    t.dockedAt = null;
+    return rejoin(w, t, line, st, 0);
+  }
+  // Hold at the first stop until the previous vehicle of the same kind is a fair share of a round trip ahead.
+  if (t.fromIdx === 0) {
+    const fleet = w.vehiclesOn(line.id, t.type.carries).length;
+    const gap = (roundTrip(line, t.type) / fleet) * 0.8;
+    const since = w.time - line.departed[t.type.carries];
+    if (fleet > 1 && since < gap) {
+      t.dwell = Math.min(gap - since, 2);
+      return;
     }
-    t.dwell += step;
+    line.departed[t.type.carries] = w.time;
   }
-}
-
-/** Move one passenger off or onto the vehicle; false when nobody is left to move. */
-function dwellAction(w: World, t: Vehicle, st: Stop, choices: Map<string, Choice | null>): boolean {
-  for (let k = 0; k < t.riders.length; k++) {
-    const r = t.riders[k];
-    const d = w.router.decideAlight(t, st, r.dest);
-    if (d === 'stay') continue;
-    t.riders.splice(k, 1);
-    r.rides.push([t.line, t.odo - r.boardOdo]);
-    if (d === 'deliver') w.deliver(r, st);
-    else if (st.waiting.length < CONFIG.stop[st.mode].capacity) st.waiting.push(r);
-    else w.lost++;
-    return true;
-  }
-  if (t.riders.length >= t.type.capacity) return false;
-  for (let k = 0; k < st.waiting.length; k++) {
-    const p = st.waiting[k];
-    const key = `${p.dest}:${p.walked}`;
-    if (!choices.has(key)) choices.set(key, w.router.decide(st, p.dest, t, !p.walked));
-    const c = choices.get(key);
-    if (c?.kind !== 'board' || c.line !== t.line || c.dir !== t.dir) continue;
-    st.waiting.splice(k, 1);
-    p.boardOdo = t.odo;
-    t.riders.push(p);
-    return true;
-  }
-  return false;
+  w.board(t, line, st, t.dir); // top up with whoever arrived while it stood
+  t.dockedAt = null;
+  startSegment(t, line, 0);
 }
 
 /** Re-attach vehicles to their line after an edit, keeping progress along unchanged segments. */

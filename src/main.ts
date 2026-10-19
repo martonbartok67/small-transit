@@ -67,10 +67,12 @@ function persist(): void {
 const editor = new Editor(() => world, cam, {
   tapStop: (s) => hud.openSheet({ kind: 'stop', id: s.id }),
   tapLine: (l) => hud.openSheet({ kind: 'line', id: l.id }),
+  tapIndustry: (i) => hud.openSheet({ kind: 'industry', id: i.id }),
+  tapTown: (t) => hud.openSheet({ kind: 'town', id: t.id }),
   tapEmpty: () => hud.openSheet(null),
   lineCreated: (l) => {
     hud.openSheet({ kind: 'line', id: l.id });
-    hud.toast(`${l.name} built. Buy a ${l.mode === 'rail' ? 'train' : 'bus'} to start service.`, 3500);
+    hud.toast(`${l.name} built. Buy ${l.mode === 'rail' ? 'a train or a freight train' : 'a bus or a truck'} to start service.`, 3500);
     navigator.vibrate?.(8);
   },
   toast: (m) => hud.toast(m),
@@ -80,9 +82,9 @@ const hud = new Hud(document.getElementById('hud')!, {
   setSpeed: (s) => (speed = s),
   setTool: (t) => {
     editor.tool = editor.tool === t && t !== 'select' ? 'select' : t;
-    if (editor.tool === 'rail' || editor.tool === 'bus') {
-      const label = editor.tool === 'rail' ? 'a station' : 'a bus stop';
-      hud.toast(`Tap the map to build ${label} (${money(CONFIG.stop[editor.tool].price)}). Darker houses are already served.`, 3000);
+    if (editor.tool === 'rail' || editor.tool === 'road') {
+      const label = editor.tool === 'rail' ? 'a station' : 'a road stop';
+      hud.toast(`Tap the map to build ${label} (${money(CONFIG.stop[editor.tool].price)}). Inside a dashed ring it also serves that industry.`, 3500);
     }
   },
   start: () => {

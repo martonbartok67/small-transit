@@ -1,12 +1,12 @@
 {
   "name": "Small Transit",
   "short_name": "Transit",
-  "description": "Run a transport company: connect towns by rail and bus, and stay in the black.",
+  "description": "Run a transport company: carry passengers and freight by rail and road, and stay in the black.",
   "start_url": "/",
   "display": "fullscreen",
   "orientation": "any",
-  "background_color": "#ebe7da",
-  "theme_color": "#ebe7da",
+  "background_color": "#22292e",
+  "theme_color": "#22292e",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

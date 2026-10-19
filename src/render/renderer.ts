@@ -1,35 +1,70 @@
-import { CONFIG } from '../sim/config';
-import { v, type Vec2 } from '../sim/geom';
-import type { Stop, Vehicle } from '../sim/types';
-import { vehiclePose } from '../sim/vehicles';
-import { money, type World } from '../sim/world';
+import { CARGO_LABEL, CONFIG } from '../sim/config';
+import { v, type Polygon, type Vec2 } from '../sim/geom';
+import { townRadius } from '../sim/towns';
+import type { Cargo, Industry, Stop, Vehicle } from '../sim/types';
+import { loadOf, vehiclePose } from '../sim/vehicles';
+import { LINE_SPACING, money, type World } from '../sim/world';
 import type { Camera } from '../ui/camera';
 import { lineHandles, type Editor } from '../ui/editor';
 
 export const THEME = {
-  land: '#ebe7da',
-  hill: '#ddd8c0',
-  hillEdge: '#cfc8aa',
-  water: '#bad4e5',
-  waterEdge: '#a8c6db',
-  house: '#c4b9ab',
-  houseServed: '#8d7f71',
-  road: '#d0c9bb',
-  ink: '#2b2622',
-  muted: '#7d746c',
-  paper: '#ffffff',
-  bad: '#c8392b',
-  lines: ['#d9412b', '#2867d4', '#1a9a55', '#e09b00', '#8b46b3', '#0098a8', '#e0629a', '#6b7a1f'],
+  outside: '#748a58',
+  grass: '#a2b977',
+  hill: '#b8b687',
+  hillEdge: '#9f9d6f',
+  forest: '#62884a',
+  tree: '#4b6f36',
+  treeLight: '#6f9a52',
+  field: ['#d3c383', '#b7c36c'],
+  fieldRow: ['#bfae6c', '#a2af58'],
+  water: '#5f97c0',
+  waterEdge: '#8fbbd8',
+  road: '#76726b',
+  roadEdge: '#58554f',
+  roadDash: '#ece6d3',
+  street: '#8c887f',
+  ballast: '#a79d8c',
+  sleeper: '#66513f',
+  rail: '#34322f',
+  roofs: ['#b45e3d', '#8e5a42', '#6c7480', '#c69a69'],
+  ridge: 'rgba(0,0,0,0.22)',
+  platform: '#dcd6c8',
+  stationRoof: '#44505b',
+  busStop: '#2d6cae',
+  ink: '#1c2125',
+  label: '#ffffff',
+  bad: '#e2553f',
+  loco: '#2c5b87',
+  coach: '#e6dcc0',
+  wagon: '#6f655b',
+  bus: '#e0ab2e',
+  truck: '#b8412f',
+  lines: ['#e8503a', '#3b7ddd', '#2fae64', '#f0a828', '#9b5ac6', '#14a8b8', '#ec6fa6', '#8a9a2a'],
+  cargo: { grain: '#e5c24a', logs: '#8b5a2b', food: '#d65f5f', goods: '#6a90cc' } satisfies Record<Cargo, string>,
 };
 
 const LOUPE_R = 64;
 const LOUPE_ZOOM = 1.8;
+/** Below this zoom the town roofs come from a cached bitmap instead of being drawn one by one. */
+const ROOF_CACHE_ZOOM = 0.2;
+const ROOF_CACHE_SCALE = 0.25;
+
+interface Patterns {
+  grass: CanvasPattern;
+  forest: CanvasPattern;
+  hill: CanvasPattern;
+  field: CanvasPattern[];
+}
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private w = 0;
   private h = 0;
   private dpr = 1;
+  private pat: Patterns;
+  private roofCache: { canvas: HTMLCanvasElement; key: string } | null = null;
+  private fields = new Map<number, { poly: Polygon; kind: number }[]>();
+  private stopAngles = { version: -1, map: new Map<number, number>() };
   /** Screen px reserved for the HUD above and below the map. */
   insets = { top: 64, bottom: 92 };
 
@@ -38,6 +73,7 @@ export class Renderer {
     private cam: Camera,
   ) {
     this.ctx = canvas.getContext('2d')!;
+    this.pat = makePatterns(this.ctx);
     this.resize();
   }
 
@@ -56,7 +92,7 @@ export class Renderer {
     this.cam.setViewport(0, this.insets.top, this.w, this.h - this.insets.top - this.insets.bottom);
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.fillStyle = THEME.land;
+    ctx.fillStyle = THEME.outside;
     ctx.fillRect(0, 0, this.w, this.h);
     this.applyCamera(this.cam.zoom, this.cam.x, this.cam.y, this.cam.cx, this.cam.cy);
     this.drawScene(world, editor, now, this.cam.zoom);
@@ -69,16 +105,19 @@ export class Renderer {
 
   private drawScene(world: World, editor: Editor, now: number, z: number): void {
     const px = (n: number) => n / z;
-    this.drawTerrain(world, px);
-    this.drawHouses(world, z);
-    if (editor.tool === 'rail' || editor.tool === 'bus') this.drawCatchments(world, editor, px);
-    this.drawWays(world, px);
+    this.drawGround(world, px);
+    this.drawStreets(world, z);
+    this.drawRoads(world, px, z);
+    this.drawTrack(world, px, z);
+    this.drawRoofs(world, z);
+    for (const ind of world.industries) this.drawIndustry(ind, px, z);
+    if (editor.tool === 'rail' || editor.tool === 'road') this.drawReach(world, editor.tool, px);
     const pv = editor.preview();
     this.drawLines(world, editor, px, pv?.lineId ?? null);
     if (pv) this.drawPreview(world, editor, px);
-    for (const t of world.vehicles) this.drawVehicle(t, px);
-    for (const s of world.stops) this.drawStop(world, s, px, z, now);
-    this.drawTownLabels(world, px);
+    for (const s of world.stops) this.drawStop(world, s, px, now);
+    for (const t of world.vehicles) this.drawVehicle(t, px, z);
+    this.drawLabels(world, px, z);
   }
 
   private polygon(poly: Vec2[]): void {
@@ -88,29 +127,10 @@ export class Renderer {
     ctx.closePath();
   }
 
-  private drawTerrain(world: World, px: (n: number) => number): void {
+  private trace(path: Vec2[]): void {
     const ctx = this.ctx;
-    const m = world.map;
-    ctx.strokeStyle = THEME.hillEdge;
-    ctx.lineWidth = px(1.5);
-    ctx.lineJoin = 'round';
-    for (const hpoly of m.hills) {
-      ctx.fillStyle = THEME.hill;
-      this.polygon(hpoly);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.fillStyle = THEME.water;
-    ctx.strokeStyle = THEME.waterEdge;
-    for (const w of m.water) {
-      this.polygon(w);
-      ctx.fill();
-      ctx.stroke();
-    }
-    // Map edge.
-    ctx.strokeStyle = THEME.hillEdge;
-    ctx.lineWidth = px(2);
-    ctx.strokeRect(-m.halfW, -m.halfH, m.halfW * 2, m.halfH * 2);
+    ctx.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
   }
 
   private visible(p: Vec2, pad: number): boolean {
@@ -120,72 +140,326 @@ export class Renderer {
     return Math.abs(p.x - c.x) < hw && Math.abs(p.y - c.y) < hh;
   }
 
-  private drawHouses(world: World, z: number): void {
+  // ---------- landscape ----------
+
+  private drawGround(world: World, px: (n: number) => number): void {
     const ctx = this.ctx;
-    // Two batched passes: houses no stop reaches, then houses in a catchment (darker).
-    for (const served of [false, true]) {
-      ctx.fillStyle = served ? THEME.houseServed : THEME.house;
+    const m = world.map;
+    ctx.fillStyle = this.pat.grass;
+    ctx.fillRect(-m.halfW, -m.halfH, m.halfW * 2, m.halfH * 2);
+    for (const f of this.farmFields(world)) {
+      ctx.fillStyle = this.pat.field[f.kind];
+      this.polygon(f.poly);
+      ctx.fill();
+    }
+    ctx.fillStyle = this.pat.hill;
+    ctx.strokeStyle = THEME.hillEdge;
+    ctx.lineWidth = px(1.5);
+    ctx.lineJoin = 'round';
+    for (const h of m.hills) {
+      this.polygon(h);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = this.pat.forest;
+    for (const f of m.forests) {
+      this.polygon(f);
+      ctx.fill();
+    }
+    ctx.fillStyle = THEME.water;
+    ctx.strokeStyle = THEME.waterEdge;
+    ctx.lineWidth = Math.max(px(2), 8);
+    for (const w of m.water) {
+      this.polygon(w);
+      ctx.stroke();
+      ctx.fill();
+    }
+  }
+
+  /** A patchwork of fields around each farm, laid out once. */
+  private farmFields(world: World): { poly: Polygon; kind: number }[] {
+    const all: { poly: Polygon; kind: number }[] = [];
+    for (const ind of world.industries) {
+      if (ind.kind !== 'farm') continue;
+      let f = this.fields.get(ind.id);
+      if (!f) {
+        f = [];
+        const a = ((ind.id * 37) % 40) * (Math.PI / 180) - 0.35;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const W = 170;
+        const H = 120;
+        for (let gx = -2; gx <= 1; gx++) {
+          for (let gy = -2; gy <= 1; gy++) {
+            if ((gx === -1 || gx === 0) && (gy === -1 || gy === 0)) continue; // farmyard
+            const x0 = gx * (W + 12) + 6;
+            const y0 = gy * (H + 12) + 6;
+            const corners = [v(x0, y0), v(x0 + W, y0), v(x0 + W, y0 + H), v(x0, y0 + H)];
+            const poly = corners.map((c) => v(ind.pos.x + c.x * ca - c.y * sa, ind.pos.y + c.x * sa + c.y * ca));
+            f.push({ poly, kind: (gx + gy + 4) % 2 });
+          }
+        }
+        this.fields.set(ind.id, f);
+      }
+      all.push(...f);
+    }
+    return all;
+  }
+
+  private drawStreets(world: World, z: number): void {
+    const ctx = this.ctx;
+    const step = CONFIG.lot * CONFIG.streetEvery;
+    ctx.strokeStyle = THEME.street;
+    ctx.lineWidth = Math.max(12, 2 / z);
+    ctx.lineCap = 'butt';
+    ctx.beginPath();
+    for (const t of world.towns) {
+      const r = townRadius(t.pop) * 0.95;
+      if (!this.visible(t.center, r)) continue;
+      const c = t.center;
+      for (let x = Math.ceil((c.x - r) / step) * step; x <= c.x + r; x += step) {
+        const half = Math.sqrt(Math.max(0, r * r - (x - c.x) ** 2));
+        ctx.moveTo(x, c.y - half);
+        ctx.lineTo(x, c.y + half);
+      }
+      for (let y = Math.ceil((c.y - r) / step) * step; y <= c.y + r; y += step) {
+        const half = Math.sqrt(Math.max(0, r * r - (y - c.y) ** 2));
+        ctx.moveTo(c.x - half, y);
+        ctx.lineTo(c.x + half, y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  private drawRoads(world: World, px: (n: number) => number, z: number): void {
+    const ctx = this.ctx;
+    const paths = [...world.map.roads, ...world.wayList().filter((w) => w.mode === 'road').map((w) => w.path)];
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const width = Math.max(20, px(3));
+    for (const [color, wd] of [
+      [THEME.roadEdge, width + Math.max(4, px(1))],
+      [THEME.road, width],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = wd;
+      ctx.beginPath();
+      for (const p of paths) this.trace(p);
+      ctx.stroke();
+    }
+    if (z > 0.35) {
+      ctx.strokeStyle = THEME.roadDash;
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([14, 14]);
+      ctx.beginPath();
+      for (const p of paths) this.trace(p);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  private drawTrack(world: World, px: (n: number) => number, z: number): void {
+    const ctx = this.ctx;
+    const ways = world.wayList().filter((w) => w.mode === 'rail');
+    if (!ways.length) return;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const w of ways) {
+      ctx.strokeStyle = THEME.ballast;
+      ctx.lineWidth = Math.max(w.lanes * LINE_SPACING.rail + 8, px(4));
+      ctx.beginPath();
+      this.trace(w.path);
+      ctx.stroke();
+    }
+    for (const w of ways) {
+      for (let k = 0; k < w.lanes; k++) {
+        const off = (k - (w.lanes - 1) / 2) * LINE_SPACING.rail;
+        const path = off ? offsetPath(w.path, off) : w.path;
+        if (z > 0.35) {
+          ctx.strokeStyle = THEME.sleeper;
+          ctx.lineWidth = 8;
+          ctx.lineCap = 'butt';
+          ctx.setLineDash([2.2, 4.5]);
+          ctx.beginPath();
+          this.trace(path);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.strokeStyle = THEME.rail;
+          ctx.lineWidth = 1.1;
+          for (const side of [-2.4, 2.4]) {
+            ctx.beginPath();
+            this.trace(offsetPath(path, side));
+            ctx.stroke();
+          }
+          ctx.lineCap = 'round';
+        } else {
+          ctx.strokeStyle = THEME.rail;
+          ctx.lineWidth = Math.max(3, px(1.4));
+          ctx.beginPath();
+          this.trace(path);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  private drawRoofs(world: World, z: number): void {
+    if (z < ROOF_CACHE_ZOOM) return this.drawRoofCache(world);
+    const ctx = this.ctx;
+    const pad = 40;
+    for (let c = 0; c < THEME.roofs.length; c++) {
+      ctx.fillStyle = THEME.roofs[c];
       ctx.beginPath();
       for (const h of world.houses) {
-        if (h.stop >= 0 !== served || !this.visible(h.pos, 20)) continue;
-        const s = Math.max(6 + h.residents * 1.5, 2 / z);
-        ctx.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s);
+        if (h.roof !== c || !this.visible(h.pos, pad)) continue;
+        const s = 11 + h.residents * 1.3;
+        ctx.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s * 0.8);
       }
       ctx.fill();
     }
+    if (z > 0.6) {
+      ctx.strokeStyle = THEME.ridge;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (const h of world.houses) {
+        if (!this.visible(h.pos, pad)) continue;
+        const s = 11 + h.residents * 1.3;
+        ctx.moveTo(h.pos.x - s / 2, h.pos.y - s * 0.1);
+        ctx.lineTo(h.pos.x + s / 2, h.pos.y - s * 0.1);
+      }
+      ctx.stroke();
+    }
   }
 
-  private drawCatchments(world: World, editor: Editor, px: (n: number) => number): void {
+  /** Zoomed out, all roofs come from one bitmap that is redrawn only when houses change. */
+  private drawRoofCache(world: World): void {
+    const m = world.map;
+    const key = `${world.houses.length}:${world.seed}`;
+    if (this.roofCache?.key !== key) {
+      const canvas = this.roofCache?.canvas ?? document.createElement('canvas');
+      canvas.width = Math.ceil(m.halfW * 2 * ROOF_CACHE_SCALE);
+      canvas.height = Math.ceil(m.halfH * 2 * ROOF_CACHE_SCALE);
+      const c = canvas.getContext('2d')!;
+      c.setTransform(ROOF_CACHE_SCALE, 0, 0, ROOF_CACHE_SCALE, m.halfW * ROOF_CACHE_SCALE, m.halfH * ROOF_CACHE_SCALE);
+      for (let k = 0; k < THEME.roofs.length; k++) {
+        c.fillStyle = THEME.roofs[k];
+        c.beginPath();
+        for (const h of world.houses) {
+          if (h.roof !== k) continue;
+          const s = 14 + h.residents * 1.3;
+          c.rect(h.pos.x - s / 2, h.pos.y - s / 2, s, s * 0.85);
+        }
+        c.fill();
+      }
+      this.roofCache = { canvas, key };
+    }
+    this.ctx.drawImage(this.roofCache.canvas, -m.halfW, -m.halfH, m.halfW * 2, m.halfH * 2);
+  }
+
+  // ---------- industry ----------
+
+  private drawIndustry(ind: Industry, px: (n: number) => number, z: number): void {
+    if (!this.visible(ind.pos, 300)) return;
     const ctx = this.ctx;
-    const mode = editor.tool as 'rail' | 'bus';
-    const r = CONFIG.stop[mode].catchment;
-    ctx.fillStyle = 'rgba(43,38,34,0.05)';
-    ctx.strokeStyle = 'rgba(43,38,34,0.25)';
-    ctx.lineWidth = px(1);
+    const { x, y } = ind.pos;
+    if (z < 0.14) {
+      // A marker that stays readable when the whole map is on screen.
+      const r = px(7);
+      ctx.fillStyle = THEME.cargo[ind.produces];
+      ctx.strokeStyle = THEME.ink;
+      ctx.lineWidth = px(2);
+      ctx.beginPath();
+      ctx.rect(x - r, y - r, r * 2, r * 2);
+      ctx.fill();
+      ctx.stroke();
+      return;
+    }
+    const box = (bx: number, by: number, w: number, h: number, fill: string, roof?: string) => {
+      ctx.fillStyle = fill;
+      ctx.fillRect(x + bx, y + by, w, h);
+      if (roof) {
+        ctx.fillStyle = roof;
+        ctx.fillRect(x + bx, y + by, w, h * 0.45);
+      }
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x + bx, y + by, w, h);
+    };
+    const silo = (cx: number, cy: number, r: number, fill: string) => {
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(x + cx, y + cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    };
+    const logs = (lx: number, ly: number) => {
+      for (let i = 0; i < 4; i++) box(lx, ly + i * 7, 34, 5, THEME.cargo.logs);
+    };
+    switch (ind.kind) {
+      case 'farm':
+        ctx.fillStyle = '#c9b88d';
+        ctx.fillRect(x - 150, y - 110, 300, 220);
+        box(-60, -40, 70, 50, '#a8432f', '#7d2f22');
+        box(25, -30, 40, 30, '#9b8f7d', '#6f655a');
+        silo(-80, 30, 16, '#d8d2c4');
+        silo(-45, 35, 12, '#d8d2c4');
+        break;
+      case 'forest':
+        box(-30, -20, 50, 34, '#7a5b3a', '#5a4129');
+        logs(30, -26);
+        logs(-70, 20);
+        break;
+      case 'foodplant':
+        ctx.fillStyle = '#9a978e';
+        ctx.fillRect(x - 120, y - 80, 240, 170);
+        box(-100, -60, 120, 80, '#c9c3b5', '#8d939b');
+        box(30, -55, 70, 50, '#b9b2a2', '#7e848c');
+        silo(-70, 50, 18, '#e3ded2');
+        silo(-30, 50, 18, '#e3ded2');
+        box(60, 20, 14, 40, '#7b4a3a');
+        break;
+      case 'sawmill':
+        ctx.fillStyle = '#9b8e74';
+        ctx.fillRect(x - 130, y - 70, 260, 150);
+        box(-110, -45, 150, 50, '#9b7650', '#6d4f33');
+        logs(55, -45);
+        logs(55, 10);
+        box(-100, 25, 60, 30, '#c8a46e');
+        break;
+    }
+  }
+
+  /** While placing a stop: catchments of existing stops and the reach of each industry. */
+  private drawReach(world: World, mode: 'rail' | 'road', px: (n: number) => number): void {
+    const ctx = this.ctx;
+    ctx.lineWidth = px(1.5);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
     for (const s of world.stops) {
       if (s.mode !== mode) continue;
       ctx.beginPath();
-      ctx.arc(s.pos.x, s.pos.y, r, 0, Math.PI * 2);
+      ctx.arc(s.pos.x, s.pos.y, CONFIG.stop[mode].catchment, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
-  }
-
-  /** Stroke a polyline with rounded bends. */
-  private tracePath(path: Vec2[], radius: number): void {
-    const ctx = this.ctx;
-    ctx.moveTo(path[0].x, path[0].y);
-    for (let i = 1; i < path.length - 1; i++) ctx.arcTo(path[i].x, path[i].y, path[i + 1].x, path[i + 1].y, radius);
-    ctx.lineTo(path[path.length - 1].x, path[path.length - 1].y);
-  }
-
-  private drawWays(world: World, px: (n: number) => number): void {
-    const ctx = this.ctx;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const w of world.wayList()) {
-      if (w.mode !== 'bus') continue;
-      ctx.strokeStyle = THEME.road;
-      ctx.lineWidth = Math.max(px(8), 14);
+    ctx.setLineDash([px(6), px(6)]);
+    for (const ind of world.industries) {
+      ctx.strokeStyle = THEME.cargo[ind.produces];
+      ctx.lineWidth = px(2.5);
       ctx.beginPath();
-      this.tracePath(w.path, 40);
+      ctx.arc(ind.pos.x, ind.pos.y, CONFIG.industryReach[mode], 0, Math.PI * 2);
       ctx.stroke();
     }
-    // Rail: a dark track bed with sleepers.
-    for (const w of world.wayList()) {
-      if (w.mode !== 'rail') continue;
-      ctx.strokeStyle = THEME.ink;
-      ctx.globalAlpha = 0.18;
-      ctx.lineWidth = Math.max(px(10), 18);
-      ctx.beginPath();
-      this.tracePath(w.path, 60);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
+    ctx.setLineDash([]);
   }
 
-  private lineWidth(mode: 'rail' | 'bus', px: (n: number) => number): number {
-    return mode === 'rail' ? Math.min(px(6), 10) : Math.min(px(4), 6);
+  // ---------- network ----------
+
+  private lineWidth(px: (n: number) => number, selected: boolean): number {
+    const base = Math.min(px(3), 6);
+    return selected ? base * 2 : base;
   }
 
   private drawLines(world: World, editor: Editor, px: (n: number) => number, skip: number | null): void {
@@ -194,18 +468,18 @@ export class Renderer {
     ctx.lineJoin = 'round';
     for (const line of world.lines) {
       if (line.id === skip) continue;
-      const color = THEME.lines[line.color];
-      ctx.strokeStyle = color;
-      const lw = this.lineWidth(line.mode, px);
-      ctx.lineWidth = line.id === editor.selectedLine ? lw * 1.8 : lw;
-      for (const seg of line.segs) {
-        ctx.beginPath();
-        this.tracePath(seg.path, line.mode === 'rail' ? 60 : 40);
-        ctx.stroke();
-      }
+      const selected = line.id === editor.selectedLine;
+      const lw = this.lineWidth(px, selected);
+      ctx.strokeStyle = THEME.lines[line.color];
+      ctx.globalAlpha = selected || editor.selectedLine < 0 ? 0.9 : 0.45;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      for (const seg of line.segs) this.trace(seg.path);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
       if (editor.tool !== 'select') continue;
       for (const h of lineHandles(line, editor.handleLength())) {
-        ctx.lineWidth = lw;
+        ctx.lineWidth = Math.max(lw, px(3));
         ctx.beginPath();
         ctx.moveTo(h.base.x, h.base.y);
         ctx.lineTo(h.tip.x, h.tip.y);
@@ -221,19 +495,21 @@ export class Renderer {
     const pv = editor.preview()!;
     const ctx = this.ctx;
     const existing = pv.lineId !== null ? world.lineById(pv.lineId) : undefined;
-    const color = existing ? THEME.lines[existing.color] : THEME.ink;
+    const color = existing ? THEME.lines[existing.color] : THEME.label;
     const paths = pv.stops.length >= 2 ? world.previewLine(pv.mode, pv.stops, pv.loop).paths : [];
     const pairs: [number, number][] = [];
     for (let i = 0; i + 1 < pv.stops.length; i++) pairs.push([pv.stops[i], pv.stops[i + 1]]);
     if (pv.loop) pairs.push([pv.stops[pv.stops.length - 1], pv.stops[0]]);
-    ctx.lineWidth = this.lineWidth(pv.mode, px);
+    ctx.lineWidth = Math.max(px(4), 8);
     ctx.strokeStyle = pv.ok ? color : THEME.bad;
-    ctx.globalAlpha = pv.ok ? 1 : 0.6;
+    ctx.globalAlpha = pv.ok ? 0.95 : 0.7;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     paths.forEach((path, i) => {
       const [a, b] = pairs[i];
       if (pv.to !== null && a === pv.from && b === pv.to) return;
       ctx.beginPath();
-      this.tracePath(path, pv.mode === 'rail' ? 60 : 40);
+      this.trace(path);
       ctx.stroke();
     });
     const from = pv.from !== null ? world.stopById(pv.from) : undefined;
@@ -263,93 +539,158 @@ export class Renderer {
     ctx.fillStyle = bg;
     roundRect(ctx, at.x, at.y - h / 2, w, h, h / 2);
     ctx.fill();
-    ctx.fillStyle = THEME.paper;
+    ctx.fillStyle = THEME.label;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, at.x + px(7), at.y + px(0.5));
   }
 
-  private drawVehicle(t: Vehicle, px: (n: number) => number): void {
+  /** Direction of the track or road leaving each stop, so platforms line up with it. */
+  private stopAngle(world: World, s: Stop): number {
+    if (this.stopAngles.version !== world.networkVersion) {
+      const map = new Map<number, number>();
+      for (const l of world.lines) {
+        for (const seg of l.segs) {
+          const p = seg.path;
+          if (p.length < 2) continue;
+          if (!map.has(seg.a)) map.set(seg.a, Math.atan2(p[1].y - p[0].y, p[1].x - p[0].x));
+          const n = p.length;
+          if (!map.has(seg.b)) map.set(seg.b, Math.atan2(p[n - 1].y - p[n - 2].y, p[n - 1].x - p[n - 2].x));
+        }
+      }
+      this.stopAngles = { version: world.networkVersion, map };
+    }
+    return this.stopAngles.map.get(s.id) ?? 0;
+  }
+
+  private drawStop(world: World, s: Stop, px: (n: number) => number, now: number): void {
+    if (!this.visible(s.pos, 200)) return;
     const ctx = this.ctx;
-    const len = Math.max(t.type.carLength, px(t.type.mode === 'rail' ? 12 : 9));
-    const wid = Math.max(t.type.mode === 'rail' ? 11 : 8, px(t.type.mode === 'rail' ? 7 : 6));
-    const load = t.riders.length / t.type.capacity;
+    const age = world.time - s.bornAt;
+    const pop = age < 0.4 ? 0.7 + 0.3 * (age / 0.4) : 1;
+    const full = world.waitingTotal(s) >= CONFIG.stop[s.mode].capacity * 0.9;
+    ctx.save();
+    ctx.translate(s.pos.x, s.pos.y);
+    if (s.mode === 'rail') {
+      ctx.rotate(this.stopAngle(world, s));
+      const L = Math.max(100, px(18)) * pop;
+      const W = Math.max(30, px(9)) * pop;
+      ctx.fillStyle = THEME.platform;
+      ctx.strokeStyle = THEME.ink;
+      ctx.lineWidth = Math.max(2, px(1.5));
+      ctx.fillRect(-L / 2, -W / 2, L, W);
+      ctx.strokeRect(-L / 2, -W / 2, L, W);
+      ctx.fillStyle = THEME.stationRoof;
+      ctx.fillRect(-L * 0.3, -W / 2 - W * 0.7, L * 0.6, W * 0.7);
+      ctx.strokeRect(-L * 0.3, -W / 2 - W * 0.7, L * 0.6, W * 0.7);
+    } else {
+      const r = Math.max(11, px(6)) * pop;
+      ctx.fillStyle = THEME.busStop;
+      ctx.strokeStyle = THEME.label;
+      ctx.lineWidth = Math.max(2.5, px(1.6));
+      roundRect(ctx, -r, -r, r * 2, r * 2, r * 0.35);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = THEME.label;
+      ctx.fillRect(-r * 0.45, -r * 0.45, r * 0.9, r * 0.5);
+    }
+    ctx.restore();
+    if (full) {
+      // A small pulsing marker instead of a number: this stop turns people away.
+      const r = Math.max(px(4), 6) * (0.85 + 0.15 * Math.sin(now / 200));
+      ctx.fillStyle = THEME.bad;
+      ctx.beginPath();
+      ctx.arc(s.pos.x + px(12), s.pos.y - px(12), r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  private drawVehicle(t: Vehicle, px: (n: number) => number, z: number): void {
+    if (!this.visible(t.path[0], 4000) && !this.visible(t.path[t.path.length - 1], 4000)) return;
+    const ctx = this.ctx;
+    const k = t.type.key;
+    const len = Math.max(t.type.carLength, px(k === 'train' || k === 'freight' ? 7 : 6));
+    const wid = Math.max(k === 'train' || k === 'freight' ? 9 : 8, px(3.5));
+    const gap = Math.max(2, px(0.8));
+    const main = mainCargo(t);
+    const fill = loadOf(t) / t.type.capacity;
+    ctx.globalAlpha = t.line < 0 ? 0.5 : 1;
     for (let c = 0; c < t.type.cars; c++) {
-      const pose = vehiclePose(t, c * (len + px(2)));
+      const pose = vehiclePose(t, c * (len + gap));
       ctx.save();
       ctx.translate(pose.p.x, pose.p.y);
       ctx.rotate(Math.atan2(pose.t.y, pose.t.x));
-      ctx.globalAlpha = t.line < 0 ? 0.5 : 1;
-      ctx.fillStyle = THEME.lines[t.color];
-      roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, px(3)));
+      let body: string = THEME.coach;
+      if (k === 'bus') body = THEME.bus;
+      else if (k === 'truck') body = THEME.wagon;
+      else if (c === 0) body = THEME.loco;
+      else if (k === 'freight') body = THEME.wagon;
+      ctx.fillStyle = body;
+      roundRect(ctx, -len / 2, -wid / 2, len, wid, Math.min(wid / 3, 3));
       ctx.fill();
-      // Load shown as a white fill from the back of the car.
-      if (load > 0) {
-        ctx.fillStyle = 'rgba(255,255,255,0.75)';
-        const inset = wid * 0.25;
-        const fillLen = (len - inset * 2) * Math.min(1, load);
-        ctx.fillRect(-len / 2 + inset, -wid / 2 + inset, fillLen, wid - inset * 2);
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.lineWidth = Math.max(1, px(0.6));
+      ctx.stroke();
+      if (z > 0.3) {
+        if (k === 'bus' || (k === 'train' && c > 0)) {
+          // Window band.
+          ctx.fillStyle = 'rgba(30,40,50,0.55)';
+          ctx.fillRect(-len / 2 + 3, -wid / 2 + 2, len - 6, wid * 0.28);
+        }
+        if (k === 'truck') {
+          ctx.fillStyle = THEME.truck;
+          ctx.fillRect(len / 2 - len * 0.3, -wid / 2, len * 0.3, wid);
+        }
+      }
+      // Cargo shows as a coloured load filling the wagon or truck bed.
+      if ((k === 'freight' && c > 0) || k === 'truck') {
+        if (main && fill > 0.02) {
+          ctx.fillStyle = THEME.cargo[main];
+          const bed = k === 'truck' ? len * 0.65 : len - 4;
+          ctx.fillRect(-len / 2 + 2, -wid / 2 + 2, bed * Math.min(1, fill + 0.15), wid - 4);
+        }
       }
       ctx.restore();
     }
     ctx.globalAlpha = 1;
   }
 
-  private drawStop(world: World, s: Stop, px: (n: number) => number, z: number, now: number): void {
-    if (!this.visible(s.pos, 200)) return;
+  // ---------- labels ----------
+
+  private text(s: string, x: number, y: number, size: number, weight: number, px: (n: number) => number, color = THEME.label): void {
     const ctx = this.ctx;
-    const age = world.time - s.bornAt;
-    const pop = age < 0.4 ? 0.7 + 0.3 * (age / 0.4) : 1;
-    const { x, y } = s.pos;
-    ctx.lineWidth = px(2.5);
-    ctx.strokeStyle = THEME.ink;
-    ctx.fillStyle = THEME.paper;
-    if (s.mode === 'rail') {
-      const r = Math.max(px(9), 14) * pop;
-      roundRect(ctx, x - r, y - r, r * 2, r * 2, r * 0.35);
-    } else {
-      const r = Math.max(px(6), 8) * pop;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-    }
-    ctx.fill();
-    ctx.stroke();
-    const cap = CONFIG.stop[s.mode].capacity;
-    if (s.waiting.length > 0) {
-      const full = s.waiting.length >= cap * 0.9;
-      const pulse = full ? 0.6 + 0.4 * Math.sin(now / 150) : 1;
-      ctx.globalAlpha = pulse;
-      this.tag(String(s.waiting.length), v(x + px(12), y - px(14)), px, full ? THEME.bad : THEME.ink);
-      ctx.globalAlpha = 1;
-    }
-    // Bus stops sit close together; name them only when zoomed in enough to read.
-    if (z > (s.mode === 'rail' ? 0.32 : 0.75)) {
-      ctx.fillStyle = THEME.ink;
-      ctx.font = `500 ${px(11)}px system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(s.name, x, y + px(14));
-    }
+    ctx.font = `${weight} ${px(size)}px system-ui, sans-serif`;
+    ctx.lineWidth = px(3.5);
+    ctx.strokeStyle = 'rgba(20,24,27,0.85)';
+    ctx.lineJoin = 'round';
+    ctx.strokeText(s, x, y);
+    ctx.fillStyle = color;
+    ctx.fillText(s, x, y);
   }
 
-  private drawTownLabels(world: World, px: (n: number) => number): void {
+  private drawLabels(world: World, px: (n: number) => number, z: number): void {
     const ctx = this.ctx;
     ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     for (const t of world.towns) {
-      if (!this.visible(t.center, 300)) continue;
-      const at = v(t.center.x, t.center.y - world.townRadius(t) - px(10));
-      ctx.lineWidth = px(4);
-      ctx.strokeStyle = THEME.land;
-      ctx.fillStyle = THEME.ink;
-      ctx.textBaseline = 'bottom';
-      ctx.font = `700 ${px(15)}px system-ui, sans-serif`;
-      ctx.strokeText(t.name, at.x, at.y - px(14));
-      ctx.fillText(t.name, at.x, at.y - px(14));
-      ctx.font = `500 ${px(11)}px system-ui, sans-serif`;
-      ctx.fillStyle = THEME.muted;
-      const label = `${t.pop.toLocaleString('en-US')} people`;
-      ctx.strokeText(label, at.x, at.y);
-      ctx.fillText(label, at.x, at.y);
+      if (!this.visible(t.center, 1200)) continue;
+      // Above the town, so stations at its centre stay visible.
+      const top = t.center.y - townRadius(t.pop) * 0.85;
+      this.text(t.name, t.center.x, top - px(9), 16, 800, px);
+      this.text(`${t.pop.toLocaleString('en-US')}`, t.center.x, top + px(9), 11.5, 600, px, '#dfe6d6');
+    }
+    if (z >= 0.14) {
+      for (const ind of world.industries) {
+        if (!this.visible(ind.pos, 300)) continue;
+        const out = ind.accepts ? ind.receivedLast : ind.rate;
+        this.text(ind.name, ind.pos.x, ind.pos.y - px(30) - 60, 12.5, 700, px);
+        this.text(`${CARGO_LABEL[ind.produces]} ${Math.round(out)}/mo`, ind.pos.x, ind.pos.y - px(15) - 60, 11, 600, px, THEME.cargo[ind.produces]);
+      }
+    }
+    for (const s of world.stops) {
+      if (z < (s.mode === 'rail' ? 0.3 : 0.7) || !this.visible(s.pos, 200)) continue;
+      const n = Math.round(world.waitingTotal(s));
+      this.text(n ? `${s.name} · ${n}` : s.name, s.pos.x, s.pos.y + px(s.mode === 'rail' ? 26 : 20), 11, 600, px);
     }
   }
 
@@ -364,19 +705,45 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.beginPath();
     ctx.arc(c.x, c.y, LOUPE_R, 0, Math.PI * 2);
-    ctx.fillStyle = THEME.land;
+    ctx.fillStyle = THEME.grass;
     ctx.fill();
     ctx.clip();
     this.applyCamera(z, editor.cursor.x, editor.cursor.y, c.x, c.y);
     this.drawScene(world, editor, now, z);
     ctx.restore();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.strokeStyle = THEME.ink;
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = THEME.label;
+    ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(c.x, c.y, LOUPE_R, 0, Math.PI * 2);
     ctx.stroke();
   }
+}
+
+function mainCargo(t: Vehicle): Cargo | null {
+  let best: Cargo | null = null;
+  let n = 0;
+  for (const g of t.load) {
+    if (g.what !== 'pax' && g.n > n) {
+      n = g.n;
+      best = g.what;
+    }
+  }
+  return best;
+}
+
+/** Offset a polyline sideways (positive = left of travel), for parallel tracks and rails. */
+function offsetPath(path: Vec2[], off: number): Vec2[] {
+  const out: Vec2[] = [];
+  for (let i = 0; i < path.length; i++) {
+    const a = path[Math.max(0, i - 1)];
+    const b = path[Math.min(path.length - 1, i + 1)];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const l = Math.hypot(dx, dy) || 1;
+    out.push(v(path[i].x - (dy / l) * off, path[i].y + (dx / l) * off));
+  }
+  return out;
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
@@ -387,4 +754,71 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+/** Small repeating tiles for grass, forest, hills and fields; drawn in world units. */
+function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
+  let seed = 7;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const tile = (size: number, paint: (c: CanvasRenderingContext2D) => void): CanvasPattern => {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = size;
+    const c = cv.getContext('2d')!;
+    paint(c);
+    return ctx.createPattern(cv, 'repeat')!;
+  };
+  const grass = tile(160, (c) => {
+    c.fillStyle = THEME.grass;
+    c.fillRect(0, 0, 160, 160);
+    for (let i = 0; i < 70; i++) {
+      c.fillStyle = rnd() < 0.5 ? 'rgba(80,110,50,0.10)' : 'rgba(255,255,220,0.08)';
+      const r = 6 + rnd() * 18;
+      c.beginPath();
+      c.arc(rnd() * 160, rnd() * 160, r, 0, Math.PI * 2);
+      c.fill();
+    }
+  });
+  const forest = tile(96, (c) => {
+    c.fillStyle = THEME.forest;
+    c.fillRect(0, 0, 96, 96);
+    for (let i = 0; i < 26; i++) {
+      const x = rnd() * 96;
+      const y = rnd() * 96;
+      const r = 7 + rnd() * 6;
+      for (const [dx, dy] of [[0, 0], [96, 0], [-96, 0], [0, 96], [0, -96]]) {
+        c.fillStyle = THEME.tree;
+        c.beginPath();
+        c.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+        c.fill();
+        c.fillStyle = THEME.treeLight;
+        c.beginPath();
+        c.arc(x + dx - r * 0.3, y + dy - r * 0.3, r * 0.45, 0, Math.PI * 2);
+        c.fill();
+      }
+    }
+  });
+  const hill = tile(64, (c) => {
+    c.fillStyle = THEME.hill;
+    c.fillRect(0, 0, 64, 64);
+    c.strokeStyle = 'rgba(90,80,40,0.16)';
+    c.lineWidth = 2;
+    for (let i = -64; i < 128; i += 16) {
+      c.beginPath();
+      c.moveTo(i, 0);
+      c.lineTo(i + 64, 64);
+      c.stroke();
+    }
+  });
+  const field = [0, 1].map((k) =>
+    tile(24, (c) => {
+      c.fillStyle = THEME.field[k];
+      c.fillRect(0, 0, 24, 24);
+      c.fillStyle = THEME.fieldRow[k];
+      for (let y = 0; y < 24; y += 8) c.fillRect(0, y, 24, 3);
+    }),
+  );
+  return { grass, forest, hill, field };
 }

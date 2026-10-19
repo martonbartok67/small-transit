@@ -1,6 +1,7 @@
-import { CONFIG, vehicleFor } from '../sim/config';
+import { CARGO_LABEL, CONFIG, INDUSTRY, TOWN_CARGO, vehicleFor } from '../sim/config';
 import { Economy } from '../sim/economy';
-import type { Line, Mode } from '../sim/types';
+import type { Carries, Freight, Line, Mode } from '../sim/types';
+import { loadOf } from '../sim/vehicles';
 import { money, type World } from '../sim/world';
 import { THEME } from '../render/renderer';
 import type { Tool } from './editor';
@@ -14,22 +15,18 @@ const ICON = {
   fast: '<svg viewBox="0 0 16 16"><path d="M1 3l7 5-7 5zM8 3l7 5-7 5z"/></svg>',
   faster: '<svg viewBox="0 0 16 16"><path d="M0 4l5 4-5 4zM5.5 4l5 4-5 4zM11 4l5 4-5 4z"/></svg>',
   info: '<svg viewBox="0 0 16 16"><circle cx="8" cy="4" r="1.6"/><rect x="6.6" y="6.6" width="2.8" height="7.4" rx="1"/></svg>',
-  select:
-    '<svg viewBox="0 0 24 24"><path d="M6 3l12 9-5.2 1.1 3 6.4-2.6 1.2-3-6.4L6 18z" fill="currentColor"/></svg>',
-  rail: '<svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="4" fill="none" stroke="currentColor" stroke-width="2.6"/></svg>',
-  bus: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2.6"/></svg>',
-  bulldoze:
-    '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg>',
-  lines:
-    '<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
-  finance:
-    '<svg viewBox="0 0 24 24"><text x="12" y="18" text-anchor="middle" font-size="17" font-weight="700" fill="currentColor" font-family="system-ui">$</text></svg>',
+  select: '<svg viewBox="0 0 24 24"><path d="M6 3l12 9-5.2 1.1 3 6.4-2.6 1.2-3-6.4L6 18z" fill="currentColor"/></svg>',
+  rail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3L6 21M16 3l2 18"/><path d="M6.5 7h11M6 12h12M5.5 17h13" stroke-width="1.8"/></svg>',
+  road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 3L4 21M17 3l3 18"/><path d="M12 4v3M12 10.5v3M12 17v3"/></svg>',
+  bulldoze: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg>',
+  lines: '<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
+  finance: '<svg viewBox="0 0 24 24"><text x="12" y="18" text-anchor="middle" font-size="17" font-weight="700" fill="currentColor" font-family="system-ui">$</text></svg>',
 };
 
 const TOOLS: { tool: Tool; label: string; icon: string }[] = [
   { tool: 'select', label: 'Select', icon: ICON.select },
   { tool: 'rail', label: 'Station', icon: ICON.rail },
-  { tool: 'bus', label: 'Bus stop', icon: ICON.bus },
+  { tool: 'road', label: 'Road stop', icon: ICON.road },
   { tool: 'bulldoze', label: 'Demolish', icon: ICON.bulldoze },
 ];
 
@@ -38,24 +35,29 @@ export type Sheet =
   | { kind: 'line'; id: number; confirmDelete?: boolean }
   | { kind: 'lines' }
   | { kind: 'finance' }
-  | { kind: 'town'; id: number };
+  | { kind: 'town'; id: number }
+  | { kind: 'industry'; id: number };
 
 const HELP: { title: string; text: string }[] = [
   {
-    title: 'Connect the towns',
-    text: 'People in six towns want to travel. Pick the Station tool and tap near houses to build a rail station. Houses turn darker once a stop reaches them.',
+    title: 'Your transport company',
+    text: 'Six towns need passenger service, and farms and forests need their cargo moved. Build stations and road stops, join them into lines, and buy vehicles. Every line shows what it earns.',
   },
   {
     title: 'Build a line',
-    text: 'With Select, drag from one station to another. The price of new track shows by your finger; water needs costly bridges and hills cost more. Bus stops join with bus lines the same way, and roads inside towns are free.',
+    text: 'Pick Station or Road stop and tap the map. Then, with Select, drag from one stop to another. Track and roads follow the land: rivers need bridges and hills cost more. Country roads and town streets are already built, so road lines along them are almost free.',
   },
   {
-    title: 'Buy vehicles',
-    text: 'Tap a line to buy trains or buses. More vehicles carry more people but each costs money every month. A line with no vehicles carries nobody.',
+    title: 'Passengers',
+    text: 'Tap a line to buy trains or buses. People travel between towns and between parts of a town; a bus stop next to a station lets them change. Fares grow with distance, and long lines between small towns can lose money.',
   },
   {
-    title: 'Earn fares',
-    text: 'Fares grow with distance. Place bus stops near a station so people from the whole town can reach the train. Well-served towns grow, and bigger towns travel more. In Finance you can set ticket prices: dearer tickets earn more per rider but fewer people travel.',
+    title: 'Freight',
+    text: 'Farms grow grain for the food plant; forests send logs to the sawmill. Put a stop inside the dashed ring around an industry, link it to the factory, and buy trucks or freight trains. Factories then send food and goods to towns.',
+  },
+  {
+    title: 'Towns grow',
+    text: 'Towns with good passenger service and steady food and goods grow, up to about four times their size. Bigger towns travel more. In Finance you can set ticket prices: dearer tickets earn more per rider, but fewer people travel.',
   },
   {
     title: 'Stay solvent',
@@ -70,7 +72,7 @@ export interface HudCallbacks {
   resume(): void;
   helpToggled(open: boolean): void;
   sheetChanged(sheet: Sheet | null): void;
-  focus(stopOrLine: { stop?: number; line?: number }): void;
+  focus(target: { stop?: number; line?: number }): void;
 }
 
 export interface HudState {
@@ -81,6 +83,10 @@ export interface HudState {
   /** A saved company exists that the title screen can continue. */
   saved: boolean;
 }
+
+const FREIGHT_LABEL = (f: Freight) => (f === 'pax' ? 'Passengers' : CARGO_LABEL[f]);
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+const round = (x: number) => Math.round(x).toLocaleString('en-US');
 
 /** DOM overlay. Acts on pointerdown and re-renders a region only when its content key changes. */
 export class Hud {
@@ -177,14 +183,17 @@ export class Hud {
       case 'open-stop':
         this.cb.focus({ stop: n });
         return this.openSheet({ kind: 'stop', id: n });
-      case 'buy': {
-        const r = w.addVehicle(n);
-        if (typeof r === 'string') this.toast(r);
+      case 'buy':
+      case 'sell': {
+        // arg is `${lineId}.${carries}`
+        const [id, carries] = arg.split('.') as [string, Carries];
+        if (act === 'sell') w.sellVehicle(Number(id), carries);
+        else {
+          const r = w.addVehicle(Number(id), carries);
+          if (typeof r === 'string') this.toast(r);
+        }
         return;
       }
-      case 'sell':
-        w.sellVehicle(n);
-        return;
       case 'delete-line':
         if (this.sheet?.kind === 'line' && this.sheet.confirmDelete) {
           w.deleteLine(n);
@@ -260,18 +269,24 @@ export class Hud {
       const st = w.stopById(sh.id);
       if (!st) return this.openSheet(null);
       const lines = w.linesAt(st.id);
-      key = ['stop', st.id, st.waiting.length, st.residents, lines.map((l) => l.id).join()].join('|');
+      const by = w.waitingBy(st);
+      const inds = w.industriesAt(st);
+      key = ['stop', st.id, Math.round(w.waitingTotal(st)), st.residents, lines.map((l) => l.id).join(), inds.length].join('|');
       html = () => {
         const cap = CONFIG.stop[st.mode].capacity;
+        const waiting = (Object.keys(by) as Freight[]).map((f) => `${FREIGHT_LABEL(f)} ${round(by[f]!)}`).join(' · ') || 'Nobody';
         const rows = lines.map((l) => this.lineRow(w, l)).join('');
+        const town = st.town >= 0 ? w.towns[st.town].name : 'Countryside';
         return this.sheetFrame(
           st.name,
-          st.mode === 'rail' ? 'Rail station' : 'Bus stop',
+          `${st.mode === 'rail' ? 'Station' : 'Road stop'} · ${town}`,
           `<div class="stats">
-            ${stat('Waiting', `${st.waiting.length} / ${cap}`)}
-            ${stat('Residents', st.residents.toLocaleString('en-US'))}
+            ${stat('Waiting', `${round(w.waitingTotal(st))} / ${cap}`, w.waitingTotal(st) >= cap * 0.9)}
+            ${stat('Residents', round(st.residents))}
           </div>
-          ${rows ? `<div class="list">${rows}</div>` : `<p class="hint">No line stops here yet. With Select, drag from this ${st.mode === 'rail' ? 'station to another station' : 'stop to another bus stop'}.</p>`}
+          <p class="hint">${waiting}</p>
+          ${inds.length ? `<p class="hint">Serves ${inds.map((i) => `<b>${i.name}</b>`).join(', ')}</p>` : ''}
+          ${rows ? `<div class="list">${rows}</div>` : `<p class="hint">No line stops here yet. With Select, drag from this ${st.mode === 'rail' ? 'station to another station' : 'stop to another road stop'}.</p>`}
           ${lines.length === 0 ? `<button class="ghost danger" data-act="demolish:${st.id}">Demolish</button>` : ''}`,
         );
       };
@@ -279,25 +294,22 @@ export class Hud {
       const l = w.lineById(sh.id);
       if (!l) return this.openSheet(null);
       const vs = w.vehiclesOn(l.id);
-      const type = vehicleFor(l.mode);
       const len = l.segs.reduce((n, s2) => n + s2.length, 0);
-      const riders = vs.reduce((n, v) => n + v.riders.length, 0);
-      key = ['line', l.id, vs.length, Math.round(l.revenueMonth / 1000), Math.round(l.costMonth / 1000), l.profitLast, riders, l.stops.length, sh.confirmDelete, Math.round(w.econ.cash / 1000)].join('|');
+      const onBoard = vs.reduce((n, v) => n + loadOf(v), 0);
+      const room = vs.reduce((n, v) => n + v.type.capacity, 0);
+      key = ['line', l.id, vs.map((v) => v.type.key).join(), Math.round(l.revenueMonth / 1000), l.profitLast, Math.round(onBoard), l.stops.length, sh.confirmDelete, Math.round(w.econ.cash / 1000)].join('|');
       html = () =>
         this.sheetFrame(
           `<span class="dot" style="background:${THEME.lines[l.color]}"></span>${l.name}`,
-          `${l.mode === 'rail' ? 'Rail' : 'Bus'} line · ${l.stops.length} stops · ${(len / 1000).toFixed(1)} km${l.loop ? ' · loop' : ''}`,
+          `${l.mode === 'rail' ? 'Rail' : 'Road'} line · ${l.stops.length} stops · ${(len / 1000).toFixed(1)} km${l.loop ? ' · loop' : ''}`,
           `<div class="stats">
-            ${stat(`${type.name}s`, `${vs.length}`)}
-            ${stat('On board', `${riders}/${vs.length * type.capacity}`)}
             ${stat('Profit / month', money(l.profitLast), l.profitLast < 0)}
-            ${stat('Carried / month', `${l.carriedLast}`)}
+            ${stat('Carried / month', round(l.carriedLast))}
+            ${stat('On board', `${round(onBoard)} / ${room}`)}
           </div>
-          <div class="row-actions">
-            <button class="primary" data-act="buy:${l.id}">Buy ${type.name.toLowerCase()} · ${money(type.price)}</button>
-            <button class="ghost" data-act="sell:${l.id}" ${vs.length ? '' : 'disabled'}>Sell · +${money(type.price * CONFIG.sellRefund)}</button>
-          </div>
-          <p class="hint">Each ${type.name.toLowerCase()} carries ${type.capacity} and costs ${money(type.runningPerMonth)} a month to run.</p>
+          ${this.fleetRow(w, l, 'pax')}
+          ${this.fleetRow(w, l, 'cargo')}
+          <p class="hint">${vs.length ? 'Passenger vehicles carry people; freight vehicles carry whatever cargo waits at the stops for this line.' : 'Buy a vehicle to start service.'}</p>
           <button class="ghost danger" data-act="delete-line:${l.id}">${sh.confirmDelete ? 'Tap again to delete' : 'Delete line'}</button>`,
         );
     } else if (sh?.kind === 'lines') {
@@ -310,10 +322,56 @@ export class Hud {
             ? `<div class="list">${w.lines.map((l) => this.lineRow(w, l)).join('')}</div>`
             : '<p class="hint">No lines yet. Build two stations, then drag from one to the other with Select.</p>',
         );
+    } else if (sh?.kind === 'industry') {
+      const ind = w.industries[sh.id];
+      const route = w.cargoRoute(ind);
+      const out = ind.accepts ? ind.receivedLast : ind.rate;
+      key = ['ind', ind.id, Math.round(out), Math.round(ind.shippedLast), Math.round(ind.receivedLast), route?.stop, route?.dest].join('|');
+      html = () => {
+        const info = INDUSTRY[ind.kind];
+        const takers = this.consumers(w, ind.produces);
+        const routeText = route
+          ? `Ships ${CARGO_LABEL[ind.produces].toLowerCase()} from <b>${w.stopById(route.stop)!.name}</b> to <b>${w.stopById(route.dest)!.name}</b>.`
+          : `No route yet. Build a station or road stop inside the dashed ring, then a line with freight vehicles to ${takers}.`;
+        return this.sheetFrame(
+          ind.name,
+          info.label,
+          `<div class="stats">
+            ${stat(`${CARGO_LABEL[ind.produces]} / month`, round(out))}
+            ${stat('Shipped', ind.producedLast > 0 ? pct(ind.shippedLast / ind.producedLast) : '·')}
+            ${ind.accepts ? stat(`${CARGO_LABEL[ind.accepts]} in`, round(ind.receivedLast)) : ''}
+          </div>
+          <p class="hint">${
+            ind.accepts
+              ? `Turns ${CARGO_LABEL[ind.accepts].toLowerCase()} into ${CARGO_LABEL[ind.produces].toLowerCase()}: what arrives one month leaves the next.`
+              : 'Produces more when most of its output is shipped, and less when it piles up.'
+          }</p>
+          <p class="hint">${routeText}</p>`,
+        );
+      };
+    } else if (sh?.kind === 'town') {
+      const t = w.towns[sh.id];
+      key = ['town', t.id, t.pop, Math.round(t.tripsLast), Math.round(t.supplyLast)].join('|');
+      html = () => {
+        const g = CONFIG.growth;
+        const mine = w.houses.filter((h) => h.town === t.id);
+        const covered = mine.reduce((n, h) => n + (h.stop >= 0 ? h.residents : 0), 0) / Math.max(1, t.pop);
+        return this.sheetFrame(
+          t.name,
+          `${round(t.pop)} people · room to grow to about ${round(t.basePop * g.capFactor)}`,
+          `<div class="stats">
+            ${stat('Reach a stop', pct(covered))}
+            ${stat('Trips / month', round(t.tripsLast))}
+            ${stat('Food and goods', round(t.supplyLast))}
+            ${stat('Growth', `+${round(t.growthLast)}`)}
+          </div>
+          <p class="hint">Grows with passenger service (${pct(Math.min(1, t.tripsLast / Math.max(1, t.pop * g.tripsPerResident)))} of what it can use) and with ${TOWN_CARGO.map((c) => CARGO_LABEL[c].toLowerCase()).join(' and ')} deliveries (${pct(Math.min(1, t.supplyLast / Math.max(1, t.pop * g.supplyPerResident)))}).</p>`,
+        );
+      };
     } else if (sh?.kind === 'finance') {
       const e = w.econ;
       const L = e.last;
-      key = ['fin', Math.round(e.cash / 1000), e.loan, Economy.net(L), w.delivered, e.price.rail, e.price.bus].join('|');
+      key = ['fin', Math.round(e.cash / 1000), e.loan, Economy.net(L), Math.round(w.delivered), e.price.rail, e.price.road].join('|');
       html = () =>
         this.sheetFrame(
           'Finance',
@@ -329,12 +387,13 @@ export class Hud {
           <div class="prices">
             <h3>Ticket prices</h3>
             ${priceRow(w, 'rail')}
-            ${priceRow(w, 'bus')}
-            <p class="hint">Dearer tickets earn more per rider, but fewer people travel and towns grow slower. Raise prices where vehicles run full; lower them where seats are empty.</p>
+            ${priceRow(w, 'road')}
+            <p class="hint">Dearer tickets earn more per rider, but fewer people travel and towns grow slower. Freight rates are fixed.</p>
           </div>
           <table class="ledger">
             <caption>Last month</caption>
             ${ledgerRow('Fares', L.fares)}
+            ${ledgerRow('Freight', L.freight)}
             ${ledgerRow('Vehicle running', L.running)}
             ${ledgerRow('Track, roads and stops', L.maintenance)}
             ${ledgerRow('Loan interest', L.interest)}
@@ -342,17 +401,34 @@ export class Hud {
             ${ledgerRow('Vehicles bought and sold', L.vehicles)}
             <tr class="total"><th>Net</th><td>${money(Economy.net(L))}</td></tr>
           </table>
-          <p class="hint">${w.delivered.toLocaleString('en-US')} passengers delivered · ${Math.round(w.coverage() * 100)}% of residents reach a stop</p>`,
+          <p class="hint">${round(w.delivered)} passengers and ${round(w.deliveredCargo)} cargo delivered · ${Math.round(w.coverage() * 100)}% of residents reach a stop</p>`,
         );
     }
     this.set(this.sheetEl, 'sheet', key, html);
+  }
+
+  /** Who takes a cargo, for hints. */
+  private consumers(w: World, c: keyof typeof CARGO_LABEL): string {
+    const names = w.industries.filter((i) => i.accepts === c).map((i) => i.name);
+    if (TOWN_CARGO.includes(c)) names.push('a stop in any town');
+    return names.join(' or ');
+  }
+
+  private fleetRow(w: World, l: Line, carries: Carries): string {
+    const type = vehicleFor(l.mode, carries);
+    const n = w.vehiclesOn(l.id, carries).length;
+    return `<div class="fleet">
+      <span class="grow">${n} ${type.name.toLowerCase()}${n === 1 ? '' : 's'}<small>${type.capacity} ${carries === 'pax' ? 'seats' : 'units of cargo'} · ${money(type.runningPerMonth)}/month</small></span>
+      <button class="ghost step" data-act="sell:${l.id}.${carries}" aria-label="Sell a ${type.name.toLowerCase()}" ${n ? '' : 'disabled'}>−</button>
+      <button class="primary buy" data-act="buy:${l.id}.${carries}">Buy ${money(type.price)}</button>
+    </div>`;
   }
 
   private lineRow(w: World, l: Line): string {
     const n = w.vehiclesOn(l.id).length;
     return `<button class="list-row" data-act="open-line:${l.id}">
       <span class="dot" style="background:${THEME.lines[l.color]}"></span>
-      <span class="grow">${l.name}<small>${n} ${vehicleFor(l.mode).name.toLowerCase()}${n === 1 ? '' : 's'}${n === 0 ? ' · needs a vehicle' : ''}</small></span>
+      <span class="grow">${l.name}<small>${n} vehicle${n === 1 ? '' : 's'}${n === 0 ? ' · needs a vehicle' : ''} · ${round(l.carriedLast)} carried</small></span>
       <span class="${l.profitLast < 0 ? 'neg' : ''}">${money(l.profitLast)}</span>
     </button>`;
   }
@@ -369,13 +445,13 @@ export class Hud {
     let key = 'none';
     if (this.help !== null) key = `help:${this.help}`;
     else if (!s.started) key = `start:${s.saved}`;
-    else if (w.over) key = `over:${w.delivered}`;
+    else if (w.over) key = `over:${Math.round(w.delivered)}`;
     this.set(this.overlay, 'overlay', key, () => {
       if (this.help !== null) return this.helpCard();
       if (!s.started)
         return `<div class="overlay"><div class="card">
           <h1>Small Transit</h1>
-          <p>Run a transport company. Connect six towns by rail and bus, and stay in the black.</p>
+          <p>Run a transport company in a river valley. Carry passengers between six towns and freight from farms and forests, and stay in the black.</p>
           <div class="actions">${
             s.saved
               ? '<button class="primary" data-act="resume">Continue</button><button class="ghost" data-act="start">New company</button>'
@@ -387,7 +463,7 @@ export class Hud {
         const { year, month } = w.date();
         return `<div class="overlay"><div class="card">
           <h2>Bankrupt</h2>
-          <p>Your company closed in ${MONTHS[month]} ${year} after delivering ${w.delivered.toLocaleString('en-US')} passengers.</p>
+          <p>Your company closed in ${MONTHS[month]} ${year} after carrying ${round(w.delivered)} passengers and ${round(w.deliveredCargo)} cargo.</p>
           <div class="actions"><button class="primary" data-act="start">Start again</button></div>
         </div></div>`;
       }
@@ -422,7 +498,7 @@ const priceRow = (w: World, mode: Mode) => {
   const { min, max } = CONFIG.price;
   const km = mode === 'rail' ? 2 : 0.5;
   return `<div class="price-row">
-    <span class="grow">${mode === 'rail' ? 'Rail' : 'Bus'}<small>${km} km trip ${money(w.ticket(mode, km * 1000))} · demand ${Math.round(w.econ.demand(mode) * 100)}%</small></span>
+    <span class="grow">${mode === 'rail' ? 'Rail' : 'Road'}<small>${km} km trip ${money(w.ticket(mode, km * 1000))} · demand ${Math.round(w.econ.demand(mode) * 100)}%</small></span>
     <button class="ghost step" data-act="price:${mode}-" aria-label="Lower ${mode} prices" ${level <= min + 1e-9 ? 'disabled' : ''}>−</button>
     <b>${Math.round(level * 100)}%</b>
     <button class="ghost step" data-act="price:${mode}+" aria-label="Raise ${mode} prices" ${level >= max - 1e-9 ? 'disabled' : ''}>+</button>

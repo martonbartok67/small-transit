@@ -1,12 +1,15 @@
 :root {
-  --land: #ebe7da;
-  --ink: #2b2622;
-  --muted: #7d746c;
-  --paper: #ffffff;
-  --panel: rgba(255, 255, 255, 0.95);
-  --line: rgba(43, 38, 34, 0.12);
-  --bad: #c8392b;
-  --shadow: 0 8px 28px rgba(43, 38, 34, 0.16);
+  /* Dark instrument panels over a green landscape. --ink is text, --paper the panel. */
+  --land: #748a58;
+  --ink: #eef1ea;
+  --muted: #a3ada3;
+  --paper: #22292e;
+  --panel: rgba(30, 37, 42, 0.94);
+  --line: rgba(255, 255, 255, 0.12);
+  --accent: #f2a43a;
+  --accent-ink: #1d1a14;
+  --bad: #ff7a63;
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
 }
 * {
   box-sizing: border-box;
@@ -49,13 +52,13 @@ button:focus-visible {
   inset: 0;
   pointer-events: none;
 }
-/* Fade the map under the top bar so labels never fight the buttons. */
+/* Darken the map under the top bar so labels never fight the buttons. */
 #hud::before {
   content: '';
   position: absolute;
   inset: 0 0 auto;
-  height: calc(66px + env(safe-area-inset-top));
-  background: linear-gradient(var(--land) 70%, rgba(235, 231, 218, 0));
+  height: calc(70px + env(safe-area-inset-top));
+  background: linear-gradient(rgba(20, 25, 28, 0.55), rgba(20, 25, 28, 0));
 }
 #hud .top,
 #hud .bar,
@@ -108,7 +111,8 @@ button:focus-visible {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  border: 2px solid var(--ink);
+  border: 1.5px solid var(--line);
+  color: var(--ink);
   background: var(--panel);
   display: grid;
   place-items: center;
@@ -116,8 +120,9 @@ button:focus-visible {
   padding: 0;
 }
 .icon-btn.on {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
 }
 .icon-btn svg {
   width: 15px;
@@ -159,8 +164,8 @@ button:focus-visible {
   height: 24px;
 }
 .tool.on {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 .sep {
   width: 1px;
@@ -232,7 +237,7 @@ button:focus-visible {
   gap: 6px;
 }
 .stat {
-  background: rgba(43, 38, 34, 0.05);
+  background: rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   padding: 6px 8px;
   min-width: 0;
@@ -331,6 +336,31 @@ button:focus-visible {
   font-weight: 800;
   line-height: 1;
 }
+.fleet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.fleet .grow {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.fleet small {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sheet .primary.buy {
+  white-space: nowrap;
+  padding: 8px 12px;
+}
+.hint b {
+  color: var(--ink);
+  font-weight: 600;
+}
 .ledger {
   width: 100%;
   border-collapse: collapse;
@@ -364,8 +394,8 @@ button:focus-visible {
 /* ---------- buttons ---------- */
 .primary {
   border: none;
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--accent-ink);
   border-radius: 30px;
   padding: 11px 20px;
   font-weight: 700;
@@ -398,7 +428,7 @@ button:focus-visible {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(235, 231, 218, 0.6);
+  background: rgba(16, 20, 23, 0.55);
   backdrop-filter: blur(3px);
 }
 .card {
@@ -484,6 +514,7 @@ button:focus-visible {
   opacity: 1;
 }
 .toast {
+  box-shadow: var(--shadow);
   position: absolute;
   top: calc(70px + env(safe-area-inset-top));
   left: 50%;
@@ -491,8 +522,9 @@ button:focus-visible {
   width: max-content;
   max-width: calc(100vw - 32px);
   text-align: center;
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
   padding: 8px 14px;
   border-radius: 18px;
   font-size: 13px;
