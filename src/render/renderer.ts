@@ -18,6 +18,7 @@ const LOUPE_ZOOM = 1.8;
 /** Below this zoom the town roofs come from a cached bitmap instead of being drawn one by one. */
 const ROOF_CACHE_ZOOM = 0.2;
 const ROOF_CACHE_SCALE = 0.25;
+const MAP_FONT = "'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif";
 const HOUSE_RISE_MS = 450;
 
 interface Patterns {
@@ -667,8 +668,8 @@ export class Renderer {
   private drawReach(world: World, mode: 'rail' | 'road', px: (n: number) => number): void {
     const ctx = this.ctx;
     ctx.lineWidth = px(1.5);
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillStyle = 'rgba(10,91,211,0.08)';
+    ctx.strokeStyle = 'rgba(10,91,211,0.55)';
     for (const s of world.stops) {
       if (s.mode !== mode) continue;
       ctx.beginPath();
@@ -830,7 +831,7 @@ export class Renderer {
     const pv = editor.preview()!;
     const ctx = this.ctx;
     const existing = pv.lineId !== null ? world.lineById(pv.lineId) : undefined;
-    const color = existing ? THEME.lines[existing.color] : THEME.label;
+    const color = existing ? THEME.lines[existing.color] : THEME.ink;
     const paths = pv.stops.length >= 2 ? world.previewLine(pv.mode, pv.stops, pv.loop).paths : [];
     const pairs: [number, number][] = [];
     for (let i = 0; i + 1 < pv.stops.length; i++) pairs.push([pv.stops[i], pv.stops[i + 1]]);
@@ -868,7 +869,7 @@ export class Renderer {
 
   private tag(text: string, at: Vec2, px: (n: number) => number, bg: string): void {
     const ctx = this.ctx;
-    ctx.font = `600 ${px(12)}px system-ui, sans-serif`;
+    ctx.font = `700 ${px(12)}px ${MAP_FONT}`;
     const w = ctx.measureText(text).width + px(14);
     const h = px(22);
     ctx.fillStyle = bg;
@@ -909,7 +910,7 @@ export class Renderer {
     if (docked && this.motion) {
       // Boarding: a soft ring ripples out from the stop while a vehicle is in.
       const k = ((now / 1100) % 1 + 1) % 1;
-      ctx.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - k)).toFixed(3) + ')';
+      ctx.strokeStyle = 'rgba(17,20,24,' + (0.45 * (1 - k)).toFixed(3) + ')';
       ctx.lineWidth = px(2);
       ctx.beginPath();
       ctx.arc(s.pos.x, s.pos.y, Math.max(px(10), 18) + px(18) * k, 0, Math.PI * 2);
@@ -1094,37 +1095,39 @@ export class Renderer {
 
   // ---------- labels ----------
 
-  private text(s: string, x: number, y: number, size: number, weight: number, px: (n: number) => number, color = THEME.label): void {
+  /** Map text: ink with a white halo, so it reads on land, water and roofs alike. */
+  private text(s: string, x: number, y: number, size: number, weight: number, px: (n: number) => number, color = THEME.ink): void {
     const ctx = this.ctx;
-    ctx.font = `${weight} ${px(size)}px system-ui, sans-serif`;
+    ctx.font = `${weight} ${px(size)}px ${MAP_FONT}`;
     ctx.lineWidth = px(3.5);
-    ctx.strokeStyle = 'rgba(12,18,23,0.8)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
     ctx.lineJoin = 'round';
     ctx.strokeText(s, x, y);
     ctx.fillStyle = color;
     ctx.fillText(s, x, y);
   }
 
-  /** A dark frosted pill with text, optionally led by a coloured dot. */
-  private pill(s: string, x: number, y: number, size: number, weight: number, px: (n: number) => number, dot?: string): void {
+  /** A sign plate: black with white caps for towns, white with ink and a cargo square for industries. */
+  private plate(s: string, x: number, y: number, size: number, px: (n: number) => number, dot?: string): void {
     const ctx = this.ctx;
-    ctx.font = `${weight} ${px(size)}px system-ui, sans-serif`;
-    const dotW = dot ? px(size * 0.9) : 0;
-    const w = ctx.measureText(s).width + px(size * 1.3) + dotW;
-    const h = px(size * 1.9);
-    ctx.fillStyle = 'rgba(12,18,23,0.62)';
-    roundRect(ctx, x - w / 2, y - h / 2, w, h, h / 2);
+    const dark = !dot;
+    ctx.font = `800 ${px(size)}px ${MAP_FONT}`;
+    const dotW = dot ? px(size * 1.05) : 0;
+    const w = ctx.measureText(s).width + px(size * 1.2) + dotW;
+    const h = px(size * 1.95);
+    ctx.fillStyle = 'rgba(17,20,24,0.18)';
+    roundRect(ctx, x - w / 2 + px(1), y - h / 2 + px(2), w, h, px(4));
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
-    ctx.lineWidth = px(1);
-    ctx.stroke();
+    ctx.fillStyle = dark ? THEME.ink : '#ffffff';
+    roundRect(ctx, x - w / 2, y - h / 2, w, h, px(4));
+    ctx.fill();
     if (dot) {
+      const d = px(size * 0.62);
       ctx.fillStyle = dot;
-      ctx.beginPath();
-      ctx.arc(x - w / 2 + px(size * 0.65) + dotW * 0.2, y, px(size * 0.32), 0, Math.PI * 2);
+      roundRect(ctx, x - w / 2 + px(size * 0.5), y - d / 2, d, d, px(1.5));
       ctx.fill();
     }
-    ctx.fillStyle = THEME.label;
+    ctx.fillStyle = dark ? '#ffffff' : THEME.ink;
     ctx.fillText(s, x + dotW / 2, y + px(0.5));
   }
 
@@ -1136,15 +1139,15 @@ export class Renderer {
       if (!this.visible(t.center, 1200)) continue;
       // Above the town, so stations at its centre stay visible.
       const top = t.center.y - townRadius(t.pop) * 0.85;
-      this.pill(t.name, t.center.x, top - px(10), 15, 800, px);
+      this.plate(t.name.toUpperCase(), t.center.x, top - px(10), 14, px);
       this.text(`${t.pop.toLocaleString('en-US')}`, t.center.x, top + px(12), 11, 700, px, THEME.labelMuted);
     }
     if (z >= 0.14) {
       for (const ind of world.industries) {
         if (!this.visible(ind.pos, 300)) continue;
         const out = ind.accepts ? ind.receivedLast : ind.rate;
-        this.pill(ind.name, ind.pos.x, ind.pos.y - px(32) - 60, 12, 700, px, THEME.cargo[ind.produces]);
-        this.text(`${CARGO_LABEL[ind.produces]} ${Math.round(out)}/mo`, ind.pos.x, ind.pos.y - px(13) - 60, 11, 700, px, THEME.cargo[ind.produces]);
+        this.plate(ind.name, ind.pos.x, ind.pos.y - px(32) - 60, 11.5, px, THEME.cargo[ind.produces]);
+        this.text(`${CARGO_LABEL[ind.produces]} ${Math.round(out)}/mo`, ind.pos.x, ind.pos.y - px(13) - 60, 11, 700, px, THEME.labelMuted);
       }
     }
     for (const s of world.stops) {
@@ -1172,7 +1175,7 @@ export class Renderer {
     this.drawScene(world, editor, now, z);
     ctx.restore();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.strokeStyle = THEME.label;
+    ctx.strokeStyle = THEME.ink;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(c.x, c.y, LOUPE_R, 0, Math.PI * 2);
@@ -1249,7 +1252,7 @@ function makePatterns(ctx: CanvasRenderingContext2D): Patterns {
       }
     };
     for (let i = 0; i < 18; i++) blob(rnd() * 256, rnd() * 256, 40 + rnd() * 60, rnd() < 0.5 ? THEME.grassDark : THEME.grassLight, true);
-    for (let i = 0; i < 220; i++) blob(rnd() * 256, rnd() * 256, 0.8 + rnd() * 1.6, rnd() < 0.5 ? 'rgba(60,95,40,0.14)' : 'rgba(255,255,220,0.12)', false);
+    for (let i = 0; i < 220; i++) blob(rnd() * 256, rnd() * 256, 0.8 + rnd() * 1.6, rnd() < 0.5 ? 'rgba(60,95,40,0.07)' : 'rgba(255,255,255,0.12)', false);
   });
   const forest = tile(96, (c) => {
     c.fillStyle = THEME.forest;

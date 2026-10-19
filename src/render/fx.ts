@@ -32,9 +32,9 @@ const MERGE = 0.6;
 const NEAR = 160;
 
 const PUFF_COLOR: Record<PuffKind, string> = {
-  steam: '#f4f6f8',
+  steam: '#ffffff',
   smoke: '#5d6166',
-  dust: '#cdbb94',
+  dust: '#bfae88',
 };
 
 export class Fx {
@@ -103,7 +103,7 @@ export class Fx {
     if (!this.floaters.length) return;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `800 ${px(13)}px system-ui, sans-serif`;
+    ctx.font = `800 ${px(13)}px 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif`;
     ctx.lineJoin = 'round';
     for (const f of this.floaters) {
       const t = f.age / FLOATER_LIFE;
@@ -116,9 +116,9 @@ export class Fx {
       ctx.scale(pop, pop);
       const s = `+${label(f.amount)}`;
       ctx.lineWidth = px(4);
-      ctx.strokeStyle = 'rgba(10,30,18,0.8)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
       ctx.strokeText(s, 0, 0);
-      ctx.fillStyle = '#7ef0a6';
+      ctx.fillStyle = '#0a8f4e';
       ctx.fillText(s, 0, 0);
       ctx.restore();
     }

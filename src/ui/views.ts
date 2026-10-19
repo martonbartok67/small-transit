@@ -361,7 +361,7 @@ function lineView(w: World, id: number, confirmDelete: boolean): View | null {
     head: title(l.name, `${l.mode === 'rail' ? 'Rail' : 'Road'} · ${plural(l.stops.length, 'stop')} · ${(len / 1000).toFixed(1)} km${l.loop ? ' · loop' : ''}`, bullet(l, 'lg')),
     body: `${board([
       { label: 'Profit', value: lv('profit', live.profit), note: 'last month' },
-      { label: 'This month', value: lv('month', live.month) },
+      { label: 'Month', value: lv('month', live.month), note: 'so far' },
       { label: 'Carried', value: lv('carried', live.carried) },
       { label: 'On board', value: lv('board', live.board) },
     ])}
