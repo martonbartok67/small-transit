@@ -27,7 +27,7 @@ export const VALLEY: MapDef = {
     { name: 'Ashford', center: v(-1750, -850), pop: 2200, districts: 3 },
     { name: 'Brookvale', center: v(650, -1300), pop: 1400, districts: 2 },
     { name: 'Carlow', center: v(2050, -250), pop: 1800, districts: 2 },
-    { name: 'Dunmore', center: v(-2150, 1000), pop: 900, districts: 1 },
+    { name: 'Dunmore', center: v(-2150, 1000), pop: 900, districts: 2 },
     { name: 'Elmstead', center: v(-250, 800), pop: 2600, districts: 3 },
     { name: 'Fairhaven', center: v(1700, 1450), pop: 1200, districts: 2 },
   ],

@@ -10,12 +10,17 @@ export const CONFIG = {
   interestPerYear: 0.05,
   bankruptMonths: 3,
 
-  fareBase: 20,
-  farePerUnit: 0.14,
+  /** Ticket at list price: base + perUnit × straight-line trip distance, split between modes by distance ridden on each. */
+  fare: {
+    rail: { base: 10, perUnit: 0.22 },
+    bus: { base: 30, perUnit: 0.14 },
+  } satisfies Record<Mode, { base: number; perUnit: number }>,
+  /** Ticket price levels the player can set per mode (1 = list price); demand scales by level^-elasticity. */
+  price: { min: 0.5, max: 2, step: 0.1, elasticity: 1.5 },
 
   /** Trips per resident per month toward reachable destinations. */
-  tripRate: 0.5,
-  gravityExponent: 1.6,
+  tripRate: 0.6,
+  gravityExponent: 1.2,
   /** Passengers give up after waiting this many months. */
   patienceMonths: 2,
   walkRange: 160,
@@ -36,7 +41,7 @@ export const CONFIG = {
   } satisfies Record<Mode, { build: number; bridge: number; hill: number; maintenance: number }>,
 
   maxVehiclesPerLine: 12,
-  sellRefund: 0.5,
+  sellRefund: 0.7,
 };
 
 export const VEHICLES: Record<'train' | 'bus', VehicleType> = {
@@ -48,7 +53,7 @@ export const VEHICLES: Record<'train' | 'bus', VehicleType> = {
     accel: 40,
     decel: 80,
     capacity: 80,
-    price: 400_000,
+    price: 320_000,
     runningPerMonth: 14_000,
     dwellPerPassenger: 0.03,
     minDwell: 1,
@@ -59,12 +64,12 @@ export const VEHICLES: Record<'train' | 'bus', VehicleType> = {
     key: 'bus',
     name: 'Bus',
     mode: 'bus',
-    speed: 70,
+    speed: 85,
     accel: 40,
     decel: 60,
-    capacity: 30,
+    capacity: 36,
     price: 60_000,
-    runningPerMonth: 2_000,
+    runningPerMonth: 1_500,
     dwellPerPassenger: 0.08,
     minDwell: 0.5,
     carLength: 18,

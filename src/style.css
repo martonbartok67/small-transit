@@ -293,6 +293,44 @@ button:focus-visible {
   line-height: 1.45;
   color: var(--muted);
 }
+.prices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prices h3 {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+.price-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.price-row .grow {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.price-row small {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+.price-row b {
+  min-width: 3.2em;
+  text-align: center;
+}
+.ghost.step {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+}
 .ledger {
   width: 100%;
   border-collapse: collapse;

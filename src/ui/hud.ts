@@ -1,11 +1,11 @@
 import { CONFIG, vehicleFor } from '../sim/config';
 import { Economy } from '../sim/economy';
-import type { Line } from '../sim/types';
+import type { Line, Mode } from '../sim/types';
 import { money, type World } from '../sim/world';
 import { THEME } from '../render/renderer';
 import type { Tool } from './editor';
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const COARSE = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
 
 const ICON = {
@@ -55,7 +55,7 @@ const HELP: { title: string; text: string }[] = [
   },
   {
     title: 'Earn fares',
-    text: 'Fares grow with distance. Place bus stops near a station so people from the whole town can reach the train. Well-served towns grow, and bigger towns travel more.',
+    text: 'Fares grow with distance. Place bus stops near a station so people from the whole town can reach the train. Well-served towns grow, and bigger towns travel more. In Finance you can set ticket prices: dearer tickets earn more per rider but fewer people travel.',
   },
   {
     title: 'Stay solvent',
@@ -67,6 +67,7 @@ export interface HudCallbacks {
   setSpeed(s: number): void;
   setTool(t: Tool): void;
   start(): void;
+  resume(): void;
   helpToggled(open: boolean): void;
   sheetChanged(sheet: Sheet | null): void;
   focus(stopOrLine: { stop?: number; line?: number }): void;
@@ -77,6 +78,8 @@ export interface HudState {
   speed: number;
   tool: Tool;
   started: boolean;
+  /** A saved company exists that the title screen can continue. */
+  saved: boolean;
 }
 
 /** DOM overlay. Acts on pointerdown and re-renders a region only when its content key changes. */
@@ -153,6 +156,8 @@ export class Hud {
         return this.cb.setTool(arg as Tool);
       case 'start':
         return this.cb.start();
+      case 'resume':
+        return this.cb.resume();
       case 'help':
         return this.openHelp();
       case 'help-go':
@@ -197,6 +202,12 @@ export class Hud {
       case 'borrow':
         if (!w.econ.borrow()) this.toast(`Loan limit is ${money(CONFIG.maxLoan)}`);
         return;
+      case 'price': {
+        const mode = arg.slice(0, -1) as Mode;
+        const dir = arg.endsWith('+') ? 1 : -1;
+        w.econ.setPrice(mode, w.econ.price[mode] + dir * CONFIG.price.step);
+        return;
+      }
       case 'repay':
         if (!w.econ.repay()) this.toast(w.econ.loan > 0 ? 'Not enough cash to repay' : 'No loan to repay');
         return;
@@ -302,7 +313,7 @@ export class Hud {
     } else if (sh?.kind === 'finance') {
       const e = w.econ;
       const L = e.last;
-      key = ['fin', Math.round(e.cash / 1000), e.loan, Economy.net(L), w.delivered].join('|');
+      key = ['fin', Math.round(e.cash / 1000), e.loan, Economy.net(L), w.delivered, e.price.rail, e.price.bus].join('|');
       html = () =>
         this.sheetFrame(
           'Finance',
@@ -314,6 +325,12 @@ export class Hud {
           <div class="row-actions">
             <button class="primary" data-act="borrow">Borrow ${money(CONFIG.loanStep)}</button>
             <button class="ghost" data-act="repay" ${e.loan > 0 ? '' : 'disabled'}>Repay ${money(CONFIG.loanStep)}</button>
+          </div>
+          <div class="prices">
+            <h3>Ticket prices</h3>
+            ${priceRow(w, 'rail')}
+            ${priceRow(w, 'bus')}
+            <p class="hint">Dearer tickets earn more per rider, but fewer people travel and towns grow slower. Raise prices where vehicles run full; lower them where seats are empty.</p>
           </div>
           <table class="ledger">
             <caption>Last month</caption>
@@ -351,15 +368,20 @@ export class Hud {
   private renderOverlay(w: World, s: HudState): void {
     let key = 'none';
     if (this.help !== null) key = `help:${this.help}`;
-    else if (!s.started) key = 'start';
+    else if (!s.started) key = `start:${s.saved}`;
     else if (w.over) key = `over:${w.delivered}`;
     this.set(this.overlay, 'overlay', key, () => {
       if (this.help !== null) return this.helpCard();
-      if (key === 'start')
+      if (!s.started)
         return `<div class="overlay"><div class="card">
           <h1>Small Transit</h1>
           <p>Run a transport company. Connect six towns by rail and bus, and stay in the black.</p>
-          <div class="actions"><button class="primary" data-act="start">New company</button><button class="ghost" data-act="help">How to play</button></div>
+          <div class="actions">${
+            s.saved
+              ? '<button class="primary" data-act="resume">Continue</button><button class="ghost" data-act="start">New company</button>'
+              : '<button class="primary" data-act="start">New company</button>'
+          }<button class="ghost" data-act="help">How to play</button></div>
+          ${s.saved ? '<p class="hint">Your company is saved every month and when you leave. A new company replaces it.</p>' : ''}
         </div></div>`;
       if (w.over) {
         const { year, month } = w.date();
@@ -394,5 +416,17 @@ export class Hud {
 
 const stat = (label: string, value: string, bad = false) =>
   `<div class="stat"><small>${label}</small><b class="${bad ? 'neg' : ''}">${value}</b></div>`;
+
+const priceRow = (w: World, mode: Mode) => {
+  const level = w.econ.price[mode];
+  const { min, max } = CONFIG.price;
+  const km = mode === 'rail' ? 2 : 0.5;
+  return `<div class="price-row">
+    <span class="grow">${mode === 'rail' ? 'Rail' : 'Bus'}<small>${km} km trip ${money(w.ticket(mode, km * 1000))} · demand ${Math.round(w.econ.demand(mode) * 100)}%</small></span>
+    <button class="ghost step" data-act="price:${mode}-" aria-label="Lower ${mode} prices" ${level <= min + 1e-9 ? 'disabled' : ''}>−</button>
+    <b>${Math.round(level * 100)}%</b>
+    <button class="ghost step" data-act="price:${mode}+" aria-label="Raise ${mode} prices" ${level >= max - 1e-9 ? 'disabled' : ''}>+</button>
+  </div>`;
+};
 
 const ledgerRow = (label: string, n: number) => `<tr><th>${label}</th><td class="${n < 0 ? 'neg' : ''}">${n === 0 ? '·' : money(n)}</td></tr>`;

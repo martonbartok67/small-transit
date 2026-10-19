@@ -1,4 +1,4 @@
-import { CONFIG, vehicleFor } from './config';
+import { CONFIG, VEHICLES, vehicleFor } from './config';
 import { Economy } from './economy';
 import { dist, octilinearOptions, offsetPolyline, pointAt, pointInPolygon, polylineLength, type Vec2 } from './geom';
 import { Rng } from './rng';
@@ -29,6 +29,11 @@ interface DemandCache {
   share: number;
   dests: { district: number; w: number }[];
 }
+
+/** Bump when the save layout changes; older saves are then ignored. */
+export const SAVE_VERSION = 1;
+
+type Saved = Omit<Stop, 'covers' | 'byDistrict'> & { covers: number[]; byDistrict: [number, number][] };
 
 export class World {
   readonly rng: Rng;
@@ -205,7 +210,7 @@ export class World {
       if (s.residents === 0) continue;
       const dem = this.demandAt(s);
       if (dem.share === 0) continue;
-      s.spawnAcc += ((s.residents * CONFIG.tripRate * dem.share) / CONFIG.monthSeconds) * dt;
+      s.spawnAcc += ((s.residents * CONFIG.tripRate * dem.share * this.econ.demand(s.mode)) / CONFIG.monthSeconds) * dt;
       while (s.spawnAcc >= 1) {
         s.spawnAcc -= 1;
         const pick = this.rng.weighted(dem.dests, (x) => x.w);
@@ -263,15 +268,24 @@ export class World {
     const ridden = p.rides.reduce((n, [, d]) => n + d, 0);
     if (ridden <= 0) return;
     const origin = this.stopById(p.origin);
-    const fare = CONFIG.fareBase + CONFIG.farePerUnit * (origin ? dist(origin.pos, at.pos) : ridden);
-    this.econ.earn(fare);
+    const straight = origin ? dist(origin.pos, at.pos) : ridden;
+    let fare = 0;
     for (const [lineId, d] of p.rides) {
       const line = this.lineById(lineId);
+      const part = (this.ticket(line?.mode ?? at.mode, straight) * d) / ridden;
+      fare += part;
       if (!line) continue;
-      line.revenueMonth += (fare * d) / ridden;
+      line.revenueMonth += part;
       line.carriedMonth++;
     }
+    this.econ.earn(fare);
     this.events.push({ type: 'deliver', stop: at.id, fare, line: p.rides[p.rides.length - 1][0] });
+  }
+
+  /** Price of a trip of this straight-line length, wholly on one mode, at the current price level. */
+  ticket(mode: Mode, distance: number): number {
+    const f = CONFIG.fare[mode];
+    return (f.base + f.perUnit * distance) * this.econ.price[mode];
   }
 
   // ---------- building: stops ----------
@@ -551,6 +565,65 @@ export class World {
     this.econ.refund(v.type.price * CONFIG.sellRefund);
     this.vehicles.splice(this.vehicles.indexOf(v), 1);
     this.router.invalidate();
+  }
+
+  // ---------- saving ----------
+
+  /** The whole game as JSON. Caches (router, demand, base paths) are left out and rebuilt on load. */
+  save(): string {
+    const e = this.econ;
+    return JSON.stringify({
+      v: SAVE_VERSION,
+      map: this.map.name,
+      seed: this.seed,
+      rng: this.rng.state,
+      time: this.time,
+      nextId: this.nextId,
+      monthIndex: this.monthIndex,
+      walkTimer: this.walkTimer,
+      lost: this.lost,
+      delivered: this.delivered,
+      networkVersion: this.networkVersion,
+      over: this.over,
+      econ: { cash: e.cash, loan: e.loan, month: e.month, last: e.last, negativeMonths: e.negativeMonths, price: e.price },
+      towns: this.towns,
+      districts: this.districts,
+      houses: this.houses.map((h) => [h.pos.x, h.pos.y, h.residents, h.town, h.district, h.stop]),
+      stops: this.stops.map((s): Saved => ({ ...s, covers: [...s.covers], byDistrict: [...s.byDistrict] })),
+      lines: this.lines,
+      vehicles: this.vehicles.map((v) => ({ ...v, type: v.type.key })),
+      ways: [...this.ways.values()],
+    });
+  }
+
+  /** Rebuild a world from save(); null when the save is unreadable or from another version or map. */
+  static load(map: MapDef, json: string): World | null {
+    try {
+      const d = JSON.parse(json);
+      if (d?.v !== SAVE_VERSION || d.map !== map.name) return null;
+      const w = new World(map, d.seed);
+      w.rng.state = d.rng;
+      w.time = d.time;
+      w.nextId = d.nextId;
+      w.monthIndex = d.monthIndex;
+      w.walkTimer = d.walkTimer;
+      w.lost = d.lost;
+      w.delivered = d.delivered;
+      w.networkVersion = d.networkVersion;
+      w.over = d.over;
+      Object.assign(w.econ, d.econ);
+      w.towns = d.towns;
+      w.districts = d.districts;
+      w.houses = (d.houses as number[][]).map(([x, y, residents, town, district, stop]) => ({ pos: { x, y }, residents, town, district, stop }));
+      w.stops = (d.stops as Saved[]).map((s) => ({ ...s, covers: new Set(s.covers), byDistrict: new Map(s.byDistrict) }));
+      w.lines = d.lines;
+      w.vehicles = (d.vehicles as (Omit<Vehicle, 'type'> & { type: 'train' | 'bus' })[]).map((v) => ({ ...v, type: VEHICLES[v.type] }));
+      w.ways = new Map((d.ways as Way[]).map((x) => [x.key, x]));
+      w.router.invalidate();
+      return w;
+    } catch {
+      return null;
+    }
   }
 
   // ---------- reports ----------

@@ -1,5 +1,5 @@
 import { CONFIG } from './config';
-import type { Ledger } from './types';
+import type { Ledger, Mode } from './types';
 
 const emptyLedger = (): Ledger => ({ fares: 0, running: 0, maintenance: 0, interest: 0, construction: 0, vehicles: 0 });
 
@@ -10,6 +10,8 @@ export class Economy {
   month: Ledger = emptyLedger();
   last: Ledger = emptyLedger();
   negativeMonths = 0;
+  /** Ticket price level per mode, 1 = list price. */
+  price: Record<Mode, number> = { rail: 1, bus: 1 };
 
   /** One-off spending the player chooses; refused when cash would go negative. */
   spend(kind: 'construction' | 'vehicles', amount: number): boolean {
@@ -49,6 +51,16 @@ export class Economy {
     this.loan -= step;
     this.cash -= step;
     return true;
+  }
+
+  setPrice(mode: Mode, level: number): void {
+    const { min, max, step } = CONFIG.price;
+    this.price[mode] = Math.min(max, Math.max(min, Math.round(level / step) * step));
+  }
+
+  /** Demand multiplier at the current price for a mode: cheaper tickets, more riders. */
+  demand(mode: Mode): number {
+    return Math.pow(this.price[mode], -CONFIG.price.elasticity);
   }
 
   /** Close the month. Returns true when the company is bankrupt. */

@@ -34,4 +34,7 @@ export class Rng {
   get state(): number {
     return this.s;
   }
+  set state(s: number) {
+    this.s = s >>> 0;
+  }
 }

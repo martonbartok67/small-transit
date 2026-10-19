@@ -7,7 +7,7 @@ import { VALLEY } from './sim/maps/valley';
 import { money, World } from './sim/world';
 import { Camera } from './ui/camera';
 import { Editor } from './ui/editor';
-import { Hud } from './ui/hud';
+import { Hud, MONTHS } from './ui/hud';
 
 const STEP = 1 / 60;
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -15,6 +15,7 @@ const cam = new Camera(VALLEY.halfW, VALLEY.halfH);
 const renderer = new Renderer(canvas, cam);
 const audio = new Audio();
 
+const SAVE_KEY = 'st-save';
 const newWorld = () => new World(VALLEY, (Math.random() * 2 ** 31) | 0);
 let world = newWorld();
 let speed = 0;
@@ -29,14 +30,39 @@ const storage = {
       return null;
     }
   },
-  set(k: string, val: string): void {
+  set(k: string, val: string): boolean {
     try {
       localStorage.setItem(k, val);
+      return true;
+    } catch {
+      return false; // storage unavailable or full
+    }
+  },
+  remove(k: string): void {
+    try {
+      localStorage.removeItem(k);
     } catch {
       /* storage unavailable */
     }
   },
 };
+
+let saved = storage.get(SAVE_KEY) !== null;
+let saveWarned = false;
+/** Keep the running company in storage; a bankrupt one is forgotten. */
+function persist(): void {
+  if (!started) return;
+  if (world.over) {
+    storage.remove(SAVE_KEY);
+    saved = false;
+    return;
+  }
+  saved = storage.set(SAVE_KEY, world.save());
+  if (!saved && !saveWarned) {
+    saveWarned = true;
+    hud.toast('Could not save: browser storage is unavailable or full.', 4000);
+  }
+}
 
 const editor = new Editor(() => world, cam, {
   tapStop: (s) => hud.openSheet({ kind: 'stop', id: s.id }),
@@ -60,15 +86,21 @@ const hud = new Hud(document.getElementById('hud')!, {
     }
   },
   start: () => {
-    audio.unlock();
-    world = newWorld();
-    editor.cancel();
-    editor.tool = 'select';
-    hud.openSheet(null);
-    cam.lookAt(v(-900, 0), Math.max(cam.minZoom, cam.viewport.w / 2600));
-    started = true;
-    speed = 1;
+    begin(newWorld());
+    persist();
     if (storage.get('st-help-seen') !== '1') hud.openHelp();
+  },
+  resume: () => {
+    const w = World.load(VALLEY, storage.get(SAVE_KEY) ?? '');
+    if (!w || w.over) {
+      storage.remove(SAVE_KEY);
+      saved = false;
+      hud.toast('That save could not be read. Start a new company.', 3500);
+      return;
+    }
+    begin(w);
+    const { year, month } = w.date();
+    hud.toast(`Welcome back. ${MONTHS[month]} ${year}, ${money(w.econ.cash)} in the bank.`, 3000);
   },
   helpToggled: (open) => {
     if (open) {
@@ -88,6 +120,17 @@ const hud = new Hud(document.getElementById('hud')!, {
     if (p.x < vp.x || p.x > vp.x + vp.w || p.y < vp.y || p.y > vp.y + vp.h) cam.lookAt(s.pos);
   },
 });
+
+function begin(w: World): void {
+  audio.unlock();
+  world = w;
+  editor.cancel();
+  editor.tool = 'select';
+  hud.openSheet(null);
+  cam.lookAt(v(-900, 0), Math.max(cam.minZoom, cam.viewport.w / 2600));
+  started = true;
+  speed = 1;
+}
 
 // ---------- input: one finger edits or pans, two fingers pinch and pan ----------
 
@@ -171,8 +214,12 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('touchend', () => audio.unlock(), { passive: true });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && started && !world.over) speed = 0;
+  if (!document.hidden) return;
+  if (started && !world.over) speed = 0;
+  persist();
 });
+// iOS may close a home screen app without another visibility event.
+window.addEventListener('pagehide', persist);
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
@@ -198,15 +245,18 @@ function frame(now: number) {
     if (ev.type === 'warning') {
       hud.toast(ev.text, 5000);
       navigator.vibrate?.([30, 80, 30]);
-    } else if (ev.type === 'monthEnd' && Economy.net(world.econ.last) > 0) audio.weekEnd();
-    else if (ev.type === 'bankrupt') {
+    } else if (ev.type === 'monthEnd') {
+      if (Economy.net(world.econ.last) > 0) audio.weekEnd();
+      persist();
+    } else if (ev.type === 'bankrupt') {
+      persist();
       audio.gameOver();
       editor.cancel();
       hud.openSheet(null);
     }
   }
   world.events.length = 0;
-  hud.update({ world, speed, tool: editor.tool, started });
+  hud.update({ world, speed, tool: editor.tool, started, saved });
   renderer.insets = hud.insets();
   renderer.draw(world, editor, now);
   requestAnimationFrame(frame);

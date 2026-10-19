@@ -19,6 +19,8 @@ npm run build    # static build in dist/
 - Tap a line to buy or sell trains and buses. Tap a stop to see who is waiting.
 - Passengers walk between stops less than 160 units apart, so a bus stop next to a station feeds the trains.
 - **Finance:** borrow up to $3M at 5% a year. Three month-ends in a row with negative cash means bankruptcy.
+- **Ticket prices** (in Finance) are set per mode from 50% to 200%. Dearer tickets earn more per rider but fewer people travel (demand × price^-1.5), so raise them where vehicles run full and lower them where seats are empty.
+- The game saves every month-end and when you leave the app; the title screen offers **Continue**.
 - Drag empty ground to move the map; pinch or scroll to zoom. Space pauses; 1, 2 and 3 set the speed.
 
 ## Architecture
@@ -37,4 +39,4 @@ src/ui/           camera, gesture editor, DOM HUD and bottom sheets
 tests/            unit tests and two bots (sensible, reckless) used for tuning
 ```
 
-Balance targets, checked by `npm test`: the sensible bot grows the company to more than 1.3× its starting value in five years, and the reckless bot (borrows to the limit, builds the longest lines first) goes bankrupt.
+Balance targets, checked by `npm test`: every two-town rail line pays its way with one train, the sensible bot grows the company to more than 1.3× its starting value in five years, and the reckless bot (borrows to the limit, builds the longest lines first) goes bankrupt.

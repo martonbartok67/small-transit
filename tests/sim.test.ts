@@ -114,6 +114,49 @@ describe('economy', () => {
     expect(Economy.net(e.last)).toBeCloseTo(e.last.interest);
   });
 
+  it('trades riders for revenue per rider through ticket prices', () => {
+    const e = new Economy();
+    e.setPrice('rail', 9);
+    expect(e.price.rail).toBe(CONFIG.price.max);
+    e.setPrice('bus', 0.73);
+    expect(e.price.bus).toBeCloseTo(0.7);
+    expect(e.demand('bus')).toBeGreaterThan(1);
+    expect(e.demand('rail')).toBeLessThan(0.5);
+
+    const play = (level: number) => {
+      const w = new World(VALLEY, 4);
+      w.econ.setPrice('rail', level);
+      const a = must(w.placeStop('rail', w.towns[1].center));
+      const b = must(w.placeStop('rail', w.towns[4].center));
+      const line = must(w.commitLine(null, 'rail', [a.id, b.id], false));
+      must(w.addVehicle(line.id));
+      runMonths(w, 6);
+      return { ticket: w.ticket('rail', 2000), spawned: w.delivered + w.lost + a.waiting.length + b.waiting.length };
+    };
+    const cheap = play(0.6);
+    const dear = play(1.6);
+    expect(dear.ticket).toBeCloseTo(cheap.ticket * (1.6 / 0.6));
+    expect(dear.spawned).toBeLessThan(cheap.spawned * 0.4);
+  });
+
+  it('lets every two-town rail line pay its way with one train', () => {
+    const losers: string[] = [];
+    for (let i = 0; i < VALLEY.towns.length; i++) {
+      for (let j = i + 1; j < VALLEY.towns.length; j++) {
+        const w = new World(VALLEY, 1);
+        w.econ.cash = 1e8;
+        const a = must(w.placeStop('rail', w.towns[i].center));
+        const b = must(w.placeStop('rail', w.towns[j].center));
+        must(w.addVehicle(must(w.commitLine(null, 'rail', [a.id, b.id], false)).id));
+        runMonths(w, 6);
+        const cash = w.econ.cash;
+        runMonths(w, 6);
+        if (w.econ.cash <= cash) losers.push(`${w.towns[i].name}-${w.towns[j].name}`);
+      }
+    }
+    expect(losers).toEqual([]);
+  }, 120_000);
+
   it('goes bankrupt after three negative month-ends in a row', () => {
     const w = new World(VALLEY, 8);
     w.econ.cash = -1;
@@ -148,4 +191,27 @@ describe('economy', () => {
     }
     console.log(report.join('\n'));
   }, 120_000);
+});
+
+describe('saving', () => {
+  it('saves and loads a running game without losing anything', () => {
+    const w = new World(VALLEY, 6);
+    runMonths(w, 8, sensible);
+    w.econ.setPrice('bus', 1.3);
+    const json = w.save();
+    const back = must(World.load(VALLEY, json) ?? 'unreadable save');
+    expect(back.save()).toBe(json);
+    expect(back.econ.price.bus).toBeCloseTo(1.3);
+    expect(back.vehicles.every((v) => v.type.capacity > 0)).toBe(true);
+    const delivered = back.delivered;
+    runMonths(back, 6, sensible);
+    expect(back.over).toBeNull();
+    expect(back.delivered).toBeGreaterThan(delivered);
+    expect(Number.isFinite(back.econ.cash)).toBe(true);
+  }, 60_000);
+
+  it('ignores saves it cannot read', () => {
+    expect(World.load(VALLEY, 'not json')).toBeNull();
+    expect(World.load(VALLEY, JSON.stringify({ v: -1 }))).toBeNull();
+  });
 });

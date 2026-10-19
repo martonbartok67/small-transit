@@ -45,7 +45,8 @@ export function buildTowns(map: MapDef, rng: Rng): { towns: Town[]; districts: D
 }
 
 /** Add a house at p if the spot is free; returns it or null. */
-export function placeHouse(map: MapDef, houses: House[], districts: District[], town: number, p: Vec2, rng: Rng): House | null {
+export function placeHouse(map: MapDef, houses: House[], districts: District[], town: number, at: Vec2, rng: Rng): House | null {
+  const p = v(Math.round(at.x), Math.round(at.y)); // whole units keep saves small
   if (!isDry(map, p)) return null;
   for (const h of houses) if (Math.abs(h.pos.x - p.x) < 16 && Math.abs(h.pos.y - p.y) < 16) return null;
   let best = -1;
